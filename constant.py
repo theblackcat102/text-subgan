@@ -1,6 +1,7 @@
 import inspect
 import re
 import textwrap
+import os
 
 WRITER_PATTERN = textwrap.dedent(
     '''
@@ -12,6 +13,8 @@ WRITER_PATTERN = textwrap.dedent(
     ''')
 
 CACHE_DIR = "./cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+
 MAX_LENGTH = 50
 
 PTT_DATA = './data/批踢踢實業坊_title_only/*.txt'

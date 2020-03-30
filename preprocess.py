@@ -1,7 +1,7 @@
 import re
 import numpy as np
 
-from transfer.constant import Constants, EMOJI_PATTERN
+from constant import Constants, EMOJI_PATTERN, CACHE_DIR
 
 
 def handle_emojis(tweet):
@@ -73,20 +73,31 @@ def sort_by_length(seq, length, label):
 
 
 if __name__ == "__main__":
-    PTT_texts = [
-        "[店家]捷運六張犁站-Huaguo花果美甲室",
-        "[醫療/重疾/殘障] 59歲女/36歲女/還本終身/富邦",
-        "[閒聊] (雷)萬福 第十二週71 總會有辦法的！",
-    ]
-    DCARD_texts = [
-        "大一就變成邊緣人是正常的嗎",
-        "自然捲也可以有日系捲髮(文長燙髮過程)"
-    ]
-    for text in PTT_texts:
-        texts = clean_text(text)
-        segmented = segment_text(texts)
-        print(segmented)
-    for text in DCARD_texts:
-        texts = clean_text(text)
-        segmented = segment_text(texts)
-        print(segmented)
+    import glob, os, pickle
+    from collections import defaultdict
+    word2freq = defaultdict(int)
+    training_filename = 'data/kkday_dataset/train_title.txt'
+    with open(training_filename, 'r') as f:
+        for line in f.readlines():
+            tokens = line.strip().split(' ')
+            for t in tokens:
+                word2freq[t] += 1
+    training_filename = 'data/kkday_dataset/train_article.txt'
+    with open(training_filename, 'r') as f:
+        for line in f.readlines():
+            tokens = line.strip().split(' ')
+            for t in tokens:
+                word2freq[t] += 1
+
+    word2idx = Constants.word2idx()
+    # print(len(word2freq))
+    for key, freq in word2freq.items():
+        word2idx[key] = len(word2idx)
+    idx2word = Constants.idx2word()
+    for token, idx in word2idx.items():
+        idx2word[idx] = token
+
+    with open(os.path.join(CACHE_DIR, "word2idx.pkl"), 'wb') as f:
+        pickle.dump(word2idx, f)
+    with open(os.path.join(CACHE_DIR, "idx2word.pkl"), 'wb') as f:
+        pickle.dump(idx2word, f)

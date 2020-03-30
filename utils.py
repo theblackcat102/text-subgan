@@ -4,8 +4,8 @@ import numpy as np
 import torch
 import torch.autograd as autograd
 
-from transfer.preprocess import clean_text, segment_text, pad_sequence
-from transfer.constant import Constants, CACHE_DIR, WRITER_PATTERN
+from preprocess import clean_text, segment_text, pad_sequence
+from constant import Constants, CACHE_DIR, WRITER_PATTERN
 
 
 def get_pretrain_embedding():
@@ -22,6 +22,14 @@ def variable_mask(length, max_length, front=True):
     else:
         return mask >= b
 
+def chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    try:
+        length = len(lst)
+    except TypeError:
+        length = lst.shape[0]
+    for i in range(0, length, n):
+        yield lst[i:i + n]
 
 def one_hot(index, depth):
     size = index.size()
@@ -182,38 +190,38 @@ def write_example(E, G, batch_x, batch_y, writer, num_iter, max_length,
     writer.add_text('DCARD_to_PTT', '\n'.join(dcard2ptt), num_iter)
 
 
-class Voc:
-    idx2word = pickle.load(open(os.path.join(CACHE_DIR, "idx2word.pkl"), 'rb'))
-    word2idx = pickle.load(open(os.path.join(CACHE_DIR, "word2idx.pkl"), 'rb'))
-    vocab_size = len(idx2word)
+# class Voc:
+#     idx2word = pickle.load(open(os.path.join(CACHE_DIR, "idx2word.pkl"), 'rb'))
+#     word2idx = pickle.load(open(os.path.join(CACHE_DIR, "word2idx.pkl"), 'rb'))
+#     vocab_size = len(idx2word)
 
-    @classmethod
-    def encode(cls, words):
-        if len(words) == 0:
-            return []
-        cleaned_text = clean_text(words)
-        segmented = segment_text(cleaned_text)
-        ret = []
-        for word in segmented:
-            if word in cls.word2idx:
-                ret.append(cls.word2idx[word])
-            else:
-                ret.append(cls.word2idx[Constants.UNK_WORD])
-        # return [Constants.BOS] + ret + [Constants.EOS]
-        return np.array(ret)
+#     @classmethod
+#     def encode(cls, words):
+#         if len(words) == 0:
+#             return []
+#         cleaned_text = clean_text(words)
+#         segmented = segment_text(cleaned_text)
+#         ret = []
+#         for word in segmented:
+#             if word in cls.word2idx:
+#                 ret.append(cls.word2idx[word])
+#             else:
+#                 ret.append(cls.word2idx[Constants.UNK_WORD])
+#         # return [Constants.BOS] + ret + [Constants.EOS]
+#         return np.array(ret)
 
-    @classmethod
-    def decode(cls, idxs, stop=Constants.EOS, mapping={}):
-        ret = ""
-        for idx in idxs:
-            if idx in cls.idx2word:
-                if idx in mapping:
-                    w = mapping[idx]
-                else:
-                    w = cls.idx2word[idx]
-            else:
-                w = Constants.UNK_WORD
-            ret += w
-            if stop is not None and idx == stop:
-                break
-        return ret
+#     @classmethod
+#     def decode(cls, idxs, stop=Constants.EOS, mapping={}):
+#         ret = ""
+#         for idx in idxs:
+#             if idx in cls.idx2word:
+#                 if idx in mapping:
+#                     w = mapping[idx]
+#                 else:
+#                     w = cls.idx2word[idx]
+#             else:
+#                 w = Constants.UNK_WORD
+#             ret += w
+#             if stop is not None and idx == stop:
+#                 break
+#         return ret

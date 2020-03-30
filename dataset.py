@@ -5,8 +5,8 @@ import pickle
 from tqdm import tqdm
 from torch.utils.data import Dataset
 
-from transfer.preprocess import clean_text, segment_text, pad_sequence
-from transfer.constant import (
+from preprocess import clean_text, segment_text, pad_sequence
+from constant import (
     CACHE_DIR, DCARD_DATA, PTT_DATA, DCARD_WHITE_LIST, PTT_WHITE_LIST,
     MAX_LENGTH)
 
@@ -118,6 +118,12 @@ class AllDataset(Dataset):
 
 
 if __name__ == "__main__":
+
+    corpus = []
+    with open(filename, 'r') as f:
+        for line in f.readlines():
+            corpus.append(line.strip())
+
     dataset = AllDataset()
     for i in range(5):
         idx = np.random.randint(len(dataset))
