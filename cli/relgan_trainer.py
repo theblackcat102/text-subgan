@@ -11,7 +11,7 @@ from module.relgan_g import RelGAN_G
 from dataset import TextDataset, seq_collate
 from constant import Constants
 from utils import get_fixed_temperature, get_losses
-
+import numpy as np
 from tensorboardX import SummaryWriter
 
 
@@ -22,7 +22,7 @@ class RelGANTrainer():
         self.dataset = TextDataset(-1, 'data/kkday_dataset/train_title.txt', prefix='train_title', embedding=None, 
             max_length=args.max_seq_len)
         dataset = self.dataset
-        self.dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=4,
+        self.dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=16,
                         collate_fn=seq_collate, batch_size=args.batch_size, shuffle=True)
 
         self.pretrain_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=4,
@@ -160,19 +160,23 @@ class RelGANTrainer():
                 pbar.set_description(
                     'g_loss: %.4f, d_loss: %.4f, temp: %.4f' % (g_loss, d_loss, self.G.temperature))
 
-                if i % args.check_iter == 0 and i > 0:
+                if i % args.check_iter == 0:
                     torch.save(self.G.state_dict(), 'save/relgan_G_{}.pt'.format(i))
                     torch.save(self.D.state_dict(), 'save/relgan_D.pt')
-                if i % cfg.adv_log_step == 0 and i > 0 and writer != None:
+                if i % cfg.adv_log_step == 0 and writer != None:
                     writer.add_scalar('G/loss', g_loss, i)
                     writer.add_scalar('D/loss', d_loss, i)
                     writer.add_scalar('G/temp', self.G.temperature, i)
                 pbar.update(1)
-                if i % 100 == 0 and i > 0:
+                if i % 100 == 0:
+                    curr_temp = self.G.temperature
+                    self.G.temperature = 1.0
                     self.sample_results(writer, i)
+                    self.G.temperature = curr_temp
 
     def update_temp(self, i, N):
-        self.G.temperature = get_fixed_temperature(cfg.temperature, i, N, cfg.temp_adpt)
+        # temperature = np.maximum( np.exp(-self.args.anneal_rate * i), self.args.temperature_min)
+        self.G.temperature = get_fixed_temperature(temperature, i, N, cfg.temp_adpt)
 
     @staticmethod
     def optimize(opt, loss, model=None, retain_graph=False):
@@ -194,7 +198,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch-size', type=int, default=18)
     parser.add_argument('--clip-norm', type=float, default=1.0)
     parser.add_argument('--pretrain-epochs', type=int, default=30)
-    parser.add_argument('--iterations', type=int, default=100000)
+    parser.add_argument('--iterations', type=int, default=10000)
     parser.add_argument('--check-iter', type=int, default=1000, help='checkpoint every 1k')
     parser.add_argument('--pretrain-gen', type=str, default=None)
 
@@ -205,14 +209,16 @@ if __name__ == "__main__":
 
     parser.add_argument('--gen-embed-dim', type=int, default=64)
     parser.add_argument('--gen-hidden-dim', type=int, default=128)
-    parser.add_argument('--dis-embed-dim', type=int, default=64)
+    parser.add_argument('--dis-embed-dim', type=int, default=32)
     parser.add_argument('--max-seq-len', type=int, default=128)
     parser.add_argument('--num-rep', type=int, default=64)
 
+    parser.add_argument('--temperature-min', type=float, default=0.1)
+    parser.add_argument('--anneal-rate', type=float, default=0.00002)
 
     parser.add_argument('--gen-lr', type=float, default=0.0001)
     parser.add_argument('--gen-adv-lr', type=float, default=0.0001)
-    parser.add_argument('--dis-lr', type=float, default=0.0005)
+    parser.add_argument('--dis-lr', type=float, default=0.0002)
     args = parser.parse_args()
     trainer = RelGANTrainer(args)
     # trainer.pretrain_generator(args.pretrain_epochs)

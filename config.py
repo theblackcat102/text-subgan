@@ -38,7 +38,7 @@ ADV_train_epoch = 2000  # SeqGAN, LeakGAN-200, RelGAN-3000
 extend_vocab_size = 0  # plus test data, only used for Classifier
 
 temp_adpt = 'exp'  # no, lin, exp, log, sigmoid, quad, sqrt
-temperature = 1
+temperature = 10
 
 # ===Basic Train===
 samples_num = 10000  # 10000, mr15: 2000,
@@ -59,7 +59,7 @@ clas_lr = 1e-3
 clip_norm = 5.0
 
 pre_log_step = 10
-adv_log_step = 20
+adv_log_step = 5
 
 train_data = 'dataset/' + dataset + '.txt'
 test_data = 'dataset/testdata/' + dataset + '_test.txt'

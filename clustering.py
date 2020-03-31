@@ -72,20 +72,28 @@ if __name__ == "__main__":
     n_components = 5
     context = []
     tfidf = TfidfVectorizer().fit_transform(corpus)
-    for corpus_ in chunks(tfidf, 41000):
+    for corpus_ in chunks(tfidf, 42000):
         print(corpus_.shape)
         C = correlation_matrix(corpus_, n_components)
         context.append(C)
 
     context = np.concatenate(context, axis=0)
     kmeans = KMeans(n_clusters=n_components)
-    cluster_assignment = kmeans.fit_predict(C)
+    cluster_assignment = kmeans.fit_predict(context)
     with open('latent_variable_{}.pkl'.format(n_components), 'wb') as f:
         pickle.dump(context, f)
-    with open('cluster_index_{}.pkl'.format(n_components), 'wb') as f:
-        pickle.dump(cluster_assignment, f)
 
     with open('kmeans_{}.pkl'.format(n_components), 'wb') as f:
         pickle.dump(kmeans, f)
 
+    cluster_latent = {}
+    cluster_p = {}
+    for idx, text in enumerate(corpus):
+        cluster_latent[text] = context[idx]
+        cluster_p[text] = cluster_assignment[idx]
+
+    with open('initial_cluster_{}.pkl'.format(n_components), 'wb') as f:
+        pickle.dump({
+            'p': cluster_p, 'latent': cluster_latent
+        }, f)
     print(cluster_assignment[:100])
