@@ -22,7 +22,7 @@ class RelGANTrainer():
         self.dataset = TextDataset(-1, 'data/kkday_dataset/train_title.txt', prefix='train_title', embedding=None, 
             max_length=args.max_seq_len)
         dataset = self.dataset
-        self.dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=16,
+        self.dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=8,
                         collate_fn=seq_collate, batch_size=args.batch_size, shuffle=True)
 
         self.pretrain_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=4,
@@ -176,7 +176,7 @@ class RelGANTrainer():
 
     def update_temp(self, i, N):
         # temperature = np.maximum( np.exp(-self.args.anneal_rate * i), self.args.temperature_min)
-        self.G.temperature = get_fixed_temperature(temperature, i, N, cfg.temp_adpt)
+        self.G.temperature = get_fixed_temperature(cfg.temperature, i, N, cfg.temp_adpt)
 
     @staticmethod
     def optimize(opt, loss, model=None, retain_graph=False):
@@ -209,7 +209,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--gen-embed-dim', type=int, default=64)
     parser.add_argument('--gen-hidden-dim', type=int, default=128)
-    parser.add_argument('--dis-embed-dim', type=int, default=32)
+    parser.add_argument('--dis-embed-dim', type=int, default=64)
     parser.add_argument('--max-seq-len', type=int, default=128)
     parser.add_argument('--num-rep', type=int, default=64)
 
