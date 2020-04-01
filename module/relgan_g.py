@@ -127,6 +127,7 @@ class RelGAN_G(LSTMGenerator):
 
 
 if __name__ == "__main__":
+    from utils import gradient_penalty
     G = RelGAN_G(mem_slots=5, num_heads=12, head_size=16, embedding_dim=18, hidden_dim=18, vocab_size=3600, max_seq_len=128, padding_idx=0,
                  gpu=False)
     data = torch.randint(0, 3600, (32, 128))

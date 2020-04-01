@@ -9,6 +9,16 @@ from preprocess import clean_text, segment_text, pad_sequence
 from constant import Constants, CACHE_DIR, WRITER_PATTERN
 
 
+def str2bool(v):
+    if isinstance(v, bool):
+       return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
 def get_pretrain_embedding():
     return pickle.load(open(os.path.join(CACHE_DIR, "embedding.pkl"), 'rb'))
 
@@ -109,6 +119,7 @@ def binary_accuracy(preds, y, logits=True):
 def gradient_penalty(netD, real_data, fake_data):
     alpha = torch.rand(real_data.size(0), 1, 1)
     alpha = alpha.expand(real_data.size())
+    # print(alpha.shape, real_data.shape, fake_data.shape)
     if torch.cuda.is_available():
         alpha = alpha.cuda()
 
@@ -291,6 +302,10 @@ def get_losses(d_out_real, d_out_fake, loss_type='JS'):
         d_loss = d_loss_real + d_loss_fake
 
         g_loss = torch.mean(-d_out_fake)
+
+    elif loss_type == 'wasstestein':
+        d_loss = d_out_fake.mean() - d_out_real.mean()
+        g_loss = -d_out_fake.mean()
 
     elif loss_type == 'hinge':  # the hinge loss
         d_loss_real = torch.mean(nn.ReLU(1.0 - d_out_real))

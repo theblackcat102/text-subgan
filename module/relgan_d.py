@@ -10,6 +10,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils import spectral_norm
 
 from module.discriminator import CNNDiscriminator
 
@@ -30,7 +31,7 @@ class RelGAN_D(CNNDiscriminator):
         self.embeddings = nn.Linear(vocab_size, embed_dim, bias=False)
 
         self.convs = nn.ModuleList([
-            nn.Conv2d(1, n, (f, self.emb_dim_single), stride=(1, self.emb_dim_single)) for (n, f) in
+            spectral_norm(nn.Conv2d(1, n, (f, self.emb_dim_single), stride=(1, self.emb_dim_single))) for (n, f) in
             zip(dis_num_filters, dis_filter_sizes)
         ])
 

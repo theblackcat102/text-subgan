@@ -110,7 +110,7 @@ class RelationalMemory(nn.Module):
         else:
             return tuple(self.repackage_hidden(v) for v in h)
 
-    def initial_state(self, batch_size, trainable=False):
+    def initial_state(self, batch_size):
         """
         Creates the initial memory.
         We should ensure each row of the memory is initialized to be unique,
@@ -119,7 +119,6 @@ class RelationalMemory(nn.Module):
         (batch_size, self.mem_slots, self.mem_size).
         Args:
           batch_size: The size of the batch.
-          trainable: Whether the initial state is trainable. This is always True.
         Returns:
           init_state: A truncated or padded matrix of size
             (batch_size, self.mem_slots, self.mem_size).
