@@ -130,7 +130,7 @@ class SubSpaceRelGANTrainer():
             g_loss, _ = get_losses(d_out_real, d_out_fake, self.args.loss_type)
             bin_loss = self.dis_criterion(kbins_fake, kbins)
             c_logits = F.log_softmax(c_logits)
-            c_loss = self.KL_criterion(c_logits, norm_kbins_) / batch_size
+            c_loss = self.KL_criterion(c_logits, norm_kbins_)
 
             loss = g_loss + bin_loss + c_loss
 
@@ -255,6 +255,14 @@ class SubSpaceRelGANTrainer():
         self.bins_weight = self.dataset.calculate_stats().cuda()
         self.D.train(), self.C.train()
 
+        # update sample kbins and latent feature
+        batch = next(self.data_iterator)
+        z_bins, z_latents = batch['bins'], batch['latents']
+        z_bins = F.one_hot(z_bins, self.k_bins).float()
+
+        # fix latent feature
+        self.z_bins, self.z_latents = z_bins.cuda(), z_latents.cuda()
+
     def train(self):
         from datetime import datetime
         cur_time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
@@ -275,8 +283,8 @@ class SubSpaceRelGANTrainer():
 
         # fix latent feature
         self.z_bins, self.z_latents = z_bins.cuda(), z_latents.cuda()
-        
-
+        resample_freq = 1000
+        print(resample_freq)
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
                 self.D.train()
@@ -318,7 +326,8 @@ class SubSpaceRelGANTrainer():
                     self.G.temperature = curr_temp
                     self.G.train()
                 
-                if i % len(self.dataset) == 0 and i > 0:
+                if i % resample_freq == 0 and i > 0:
+                    resample_freq = len(self.dataset) // self.args.batch_size
                     self.update_latent()
 
         writer.flush()
