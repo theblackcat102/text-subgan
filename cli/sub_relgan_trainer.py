@@ -243,7 +243,7 @@ class SubSpaceRelGANTrainer():
         print('Calculate eigen latent features')
         # 40000 use roughly 40G of memory so reduce this if your memory is lower than 64G
         for latents_ in tqdm(chunks(latents, 40000), dynamic_ncols=True):
-            embeddings = SpectralEmbedding(n_components=self.k_bins, affinity='rbf').fit_transform(latents)
+            embeddings = SpectralEmbedding(n_components=self.k_bins, affinity='rbf').fit_transform(latents_)
             context.append(embeddings)
         context = np.concatenate(context, axis=0)
         assert self.dataset.latent.shape == context.shape
