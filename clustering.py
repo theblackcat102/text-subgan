@@ -69,7 +69,7 @@ if __name__ == "__main__":
 
     print('calculate C')
     
-    n_components = 5
+    n_components = 20
     context = []
     tfidf = TfidfVectorizer().fit_transform(corpus)
     for corpus_ in chunks(tfidf, 42000):

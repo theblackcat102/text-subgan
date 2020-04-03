@@ -25,7 +25,7 @@ def data_iter(dataloader):
                 yield batch
     return function()
 
-K_BINS = 5
+K_BINS = 20
 
 class SubSpaceRelGANTrainer():
 
@@ -42,7 +42,7 @@ class SubSpaceRelGANTrainer():
 
         self.G = RelSpaceG(args.mem_slots, args.num_heads, args.head_size, args.gen_embed_dim, 
             args.gen_hidden_dim, dataset.vocab_size,
-            k_bins=5, latent_dim=args.gen_latent_dim, noise_dim=args.gen_noise_dim,
+            k_bins=K_BINS, latent_dim=args.gen_latent_dim, noise_dim=args.gen_noise_dim,
             max_seq_len=args.max_seq_len-1, padding_idx=Constants.PAD, gpu=True)
         self.D = RelSpaceGAN_D(args.dis_embed_dim, args.max_seq_len-1, args.num_rep, dataset.vocab_size, Constants.PAD,
             kbins=K_BINS, gpu=True, dropout=0.25)
@@ -61,7 +61,7 @@ class SubSpaceRelGANTrainer():
         self.dis_opt  = optim.Adam(self.D.parameters(), lr=args.dis_lr)
 
         self.mle_criterion = nn.NLLLoss()
-        self.KL_criterion = nn.KLDivLoss()
+        self.KL_criterion = nn.KLDivLoss(reduction='batchmean')
         self.dis_criterion = nn.CrossEntropyLoss()
 
         self.data_iterator = data_iter(self.dataloader)
@@ -96,7 +96,7 @@ class SubSpaceRelGANTrainer():
                     if iter_ % cfg.pre_log_step == 0 and writer is not None:
                         writer.add_scalar('pretrain/loss', loss.item(), iter_)
 
-            torch.save(self.G.state_dict(), 'save/subspace_relgan_G_pretrained.pt')
+            torch.save(self.G.state_dict(), 'save/subspace_relgan_G_pretrained_{}.pt'.format(self.k_bins))
 
     def adv_train_generator(self, g_step=1):
         total_loss = 0
@@ -122,15 +122,16 @@ class SubSpaceRelGANTrainer():
             d_out_real, kbins_real, embed_real = self.D(real_samples)
 
             # Train cluster module
-            c_logits, _ = self.C(real_samples, embed_real)
+            _c_logits, _ = self.C(real_samples, embed_real)
+            c_logits = F.softmax(_c_logits, 1)
 
-            gen_samples = self.G.sample(kbins_, latent, batch_size, batch_size, one_hot=True)
+            gen_samples = self.G.sample(c_logits, latent, batch_size, batch_size, one_hot=True)
 
             d_out_fake, kbins_fake, embed_fake = self.D(gen_samples)
             g_loss, _ = get_losses(d_out_real, d_out_fake, self.args.loss_type)
             bin_loss = self.dis_criterion(kbins_fake, kbins)
-            c_logits = F.log_softmax(c_logits)
-            c_loss = self.KL_criterion(c_logits, norm_kbins_)
+            _c_logits = F.log_softmax(_c_logits)
+            c_loss = self.KL_criterion(_c_logits, norm_kbins_)
 
             loss = g_loss + bin_loss + c_loss
 
@@ -154,22 +155,27 @@ class SubSpaceRelGANTrainer():
             batch = next(self.data_iterator)
             inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
             kbins, latent = batch['bins'], batch['latents']
-            kbins_ = F.one_hot(kbins, self.k_bins).float()
+            # kbins_ = F.one_hot(kbins, self.k_bins).float()
             if cfg.CUDA:
-                kbins_, latent = kbins_.cuda(), latent.cuda()
+                # kbins_ = kbins_.cuda()
+                latent = latent.cuda()
                 kbins = kbins.cuda()
                 target = target.cuda()
 
             batch_size = inputs.shape[0]
             real_samples = F.one_hot(target, self.args.vocab_size).float()
-            with torch.no_grad():
-                gen_samples = self.G.sample(kbins_, latent, batch_size, batch_size, one_hot=True)
-
             if cfg.CUDA:
                 real_samples = real_samples.cuda()
+            d_out_real, kbins_real, embed_real = self.D(real_samples)
+            c_logits, _ = self.C(real_samples, embed_real)
+            c_logits = F.softmax(c_logits, 1)
+            c_bins = torch.argmax(c_logits, 1).long()
+
+            with torch.no_grad():
+                gen_samples = self.G.sample(c_logits, latent, batch_size, batch_size, one_hot=True)
+
 
             # ===Train===
-            d_out_real, kbins_real, embed_real = self.D(real_samples)
             d_out_fake, kbins_fake, embed_fake = self.D(gen_samples.detach())
             _, d_loss = get_losses(d_out_real, d_out_fake, self.args.loss_type)
 
@@ -177,7 +183,7 @@ class SubSpaceRelGANTrainer():
                 d_gp_loss = gradient_penalty(self.D, real_samples, gen_samples.detach())
                 d_loss += self.args.gp_weight*d_gp_loss
 
-            bin_loss = self.dis_criterion(kbins_real, kbins)
+            bin_loss = self.dis_criterion(kbins_real, c_bins)
 
             loss = d_loss + bin_loss
             self.dis_opt.zero_grad()
@@ -368,7 +374,7 @@ if __name__ == "__main__":
     parser.add_argument('--mem-slots', type=int, default=1)
     parser.add_argument('--num-heads', type=int, default=2)
     parser.add_argument('--gen-noise-dim', type=int, default=100)
-    parser.add_argument('--gen-latent-dim', type=int, default=5)
+    parser.add_argument('--gen-latent-dim', type=int, default=K_BINS)
     parser.add_argument('--gen-embed-dim', type=int, default=64)
     parser.add_argument('--gen-hidden-dim', type=int, default=128)
     parser.add_argument('--dis-embed-dim', type=int, default=64)
