@@ -14,7 +14,9 @@ from constant import Constants
 from utils import get_fixed_temperature, get_losses
 import numpy as np
 from tensorboardX import SummaryWriter
-from utils import gradient_penalty, str2bool
+from utils import gradient_penalty, str2bool, chunks
+from sklearn.manifold import SpectralEmbedding
+
 
 def data_iter(dataloader):
     def function():
@@ -98,7 +100,7 @@ class SubSpaceRelGANTrainer():
 
     def adv_train_generator(self, g_step=1):
         total_loss = 0
-        total_g_loss, total_bin_loss = 0, 0
+        total_g_loss, total_bin_loss, total_c_loss = 0, 0, 0
         g_step = min(g_step, 1)
 
         for step in range(g_step):
@@ -109,6 +111,7 @@ class SubSpaceRelGANTrainer():
             if cfg.CUDA:
                 kbins_, latent = kbins_.cuda(), latent.cuda()
                 kbins = kbins.cuda()
+                target = target.cuda()
 
             batch_size = inputs.shape[0]
             real_samples = F.one_hot(target, self.args.vocab_size).float()
@@ -139,8 +142,9 @@ class SubSpaceRelGANTrainer():
             total_g_loss += g_loss.item()
             total_bin_loss += bin_loss.item()
             total_loss += loss.item()
+            total_c_loss += c_loss.item()
 
-        return total_loss / g_step, total_g_loss / g_step, total_bin_loss / g_step
+        return total_loss / g_step, total_g_loss / g_step, total_bin_loss / g_step, total_c_loss / g_step
 
     def adv_train_discriminator(self, d_step=1):
         total_loss = 0
@@ -154,6 +158,7 @@ class SubSpaceRelGANTrainer():
             if cfg.CUDA:
                 kbins_, latent = kbins_.cuda(), latent.cuda()
                 kbins = kbins.cuda()
+                target = target.cuda()
 
             batch_size = inputs.shape[0]
             real_samples = F.one_hot(target, self.args.vocab_size).float()
@@ -208,19 +213,43 @@ class SubSpaceRelGANTrainer():
         
 
     def update_latent(self):
-        latents = []
-        for batch in self.dataloader:
-            inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
-            kbins, latent = batch['bins'], batch['latents']
-            real_samples = F.one_hot(target, self.args.vocab_size).float()
-            if cfg.CUDA:
-                real_samples = real_samples.cuda()
-            _, _, embed_real = self.D(real_samples)
-            # Train cluster module
-            _, embed = self.C(real_samples, embed_real)
-            latents.append(embed.cpu())
+        print('Updating latent feature')
+        eval_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=8,
+                        collate_fn=seq_collate, batch_size=64, shuffle=False)
+        latents, P = [], []
+        self.D.eval(), self.C.eval()
+        iter_ = 0
+        with torch.no_grad():
+            for batch in tqdm(eval_dataloader, dynamic_ncols=True):
+                inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
+                kbins, latent = batch['bins'], batch['latents']
+                target = target.cuda()
+                real_samples = F.one_hot(target, self.args.vocab_size).float()
+                if cfg.CUDA:
+                    real_samples = real_samples.cuda()
+                _, _, embed_real = self.D(real_samples)
+                # Train cluster module
+                logits, embed = self.C(real_samples, embed_real)
+                latents.append(embed.cpu())
+                P.append(torch.argmax(logits, 1).cpu())
+                iter_ += 1
+                # if iter_ > 10:
+                #     break
 
-        latents = torch.cat(latents, axis=0)
+        latents = torch.cat(latents, 0).data.numpy()
+        P = torch.cat(P).data.numpy()
+
+        context = []
+        print('Calculate eigen latent features')
+        for latents_ in tqdm(chunks(latents, 40000), dynamic_ncols=True):
+            embeddings = SpectralEmbedding(n_components=self.k_bins, affinity='rbf').fit_transform(latents)
+            context.append(embeddings)
+        context = np.concatenate(context, axis=0)
+        assert self.dataset.latent.shape == context.shape
+        assert self.dataset.p.shape == P.shape
+        self.dataset.latent = context
+        self.dataset.p = P
+        self.D.train(), self.C.train()
 
     def train(self):
         from datetime import datetime
@@ -244,12 +273,12 @@ class SubSpaceRelGANTrainer():
         self.z_bins, self.z_latents = z_bins.cuda(), z_latents.cuda()
         
 
-        with tqdm(total=args.iterations, dynamic_ncols=True) as pbar:
-            for i in range(args.iterations):
+        with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
+            for i in range(args.iterations+1):
                 self.D.train()
                 d_t_loss, d_loss, d_bin_loss = self.adv_train_discriminator(d_step=self.args.dis_steps)
                 self.G.train()
-                g_t_loss, g_loss, g_bin_loss = self.adv_train_generator(g_step=self.args.gen_steps)
+                g_t_loss, g_loss, g_bin_loss, c_loss = self.adv_train_generator(g_step=self.args.gen_steps)
 
                 self.update_temp(i, args.iterations)
                 pbar.set_description(
@@ -269,6 +298,7 @@ class SubSpaceRelGANTrainer():
                     writer.add_scalar('G/g_loss', g_loss, i)
                     writer.add_scalar('G/bin_loss', g_bin_loss, i)
                     writer.add_scalar('G/temp', self.G.temperature, i)
+                    writer.add_scalar('G/c_loss', c_loss, i)
 
                     writer.add_scalar('D/loss', d_t_loss, i)
                     writer.add_scalar('D/d_loss', d_loss, i)
@@ -283,6 +313,11 @@ class SubSpaceRelGANTrainer():
                     self.sample_results(writer, i)
                     self.G.temperature = curr_temp
                     self.G.train()
+                
+                if i % len(self.dataset) == 0 and i > 0:
+                    self.update_latent()
+
+        writer.flush()
 
     def update_temp(self, i, N):
         # temperature = np.maximum( np.exp(-self.args.anneal_rate * i), self.args.temperature_min)
@@ -305,7 +340,7 @@ if __name__ == "__main__":
     # args.dis_embed_dim, args.max_seq_len, args.num_rep
     # args.gen_lr args.gen_adv_lr, args.dis_lr
     parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument('--batch-size', type=int, default=18)
+    parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--clip-norm', type=float, default=1.0)
     parser.add_argument('--pretrain-epochs', type=int, default=30)
     parser.add_argument('--iterations', type=int, default=10000)
@@ -345,6 +380,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     trainer = SubSpaceRelGANTrainer(args)
+    # trainer.update_latent()
     # trainer.pretrain_generator(args.pretrain_epochs)
     trainer.train()
     # trainer._test()
