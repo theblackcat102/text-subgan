@@ -96,7 +96,6 @@ class SubSpaceRelGANTrainer():
 
             torch.save(self.G.state_dict(), 'save/subspace_relgan_G_pretrained.pt')
 
-
     def adv_train_generator(self, g_step=1):
         total_loss = 0
         total_g_loss, total_bin_loss = 0, 0
@@ -112,7 +111,7 @@ class SubSpaceRelGANTrainer():
                 kbins = kbins.cuda()
 
             batch_size = inputs.shape[0]
-            real_samples = F.one_hot(target, args.vocab_size).float()
+            real_samples = F.one_hot(target, self.args.vocab_size).float()
             if cfg.CUDA:
                 real_samples = real_samples.cuda()
             norm_kbins_ = F.softmax(kbins_ / self.bins_weight.expand(batch_size, self.k_bins), dim=1)
@@ -127,6 +126,7 @@ class SubSpaceRelGANTrainer():
             d_out_fake, kbins_fake, embed_fake = self.D(gen_samples)
             g_loss, _ = get_losses(d_out_real, d_out_fake, self.args.loss_type)
             bin_loss = self.dis_criterion(kbins_fake, kbins)
+            c_logits = F.log_softmax(c_logits)
             c_loss = self.KL_criterion(c_logits, norm_kbins_) / batch_size
 
             loss = g_loss + bin_loss + c_loss
@@ -156,7 +156,7 @@ class SubSpaceRelGANTrainer():
                 kbins = kbins.cuda()
 
             batch_size = inputs.shape[0]
-            real_samples = F.one_hot(target, args.vocab_size).float()
+            real_samples = F.one_hot(target, self.args.vocab_size).float()
             with torch.no_grad():
                 gen_samples = self.G.sample(kbins_, latent, batch_size, batch_size, one_hot=True)
 
@@ -206,6 +206,21 @@ class SubSpaceRelGANTrainer():
         from time import time
         # self.sample_results(None)
         
+
+    def update_latent(self):
+        latents = []
+        for batch in self.dataloader:
+            inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
+            kbins, latent = batch['bins'], batch['latents']
+            real_samples = F.one_hot(target, self.args.vocab_size).float()
+            if cfg.CUDA:
+                real_samples = real_samples.cuda()
+            _, _, embed_real = self.D(real_samples)
+            # Train cluster module
+            _, embed = self.C(real_samples, embed_real)
+            latents.append(embed.cpu())
+
+        latents = torch.cat(latents, axis=0)
 
     def train(self):
         from datetime import datetime
