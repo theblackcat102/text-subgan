@@ -123,7 +123,9 @@ class RelationalMemory(nn.Module):
           init_state: A truncated or padded matrix of size
             (batch_size, self.mem_slots, self.mem_size).
         """
-        init_state = torch.stack([torch.eye(self.mem_slots) for _ in range(batch_size)])
+        i_m = torch.eye(self.mem_slots).unsqueeze(0)
+        init_state = i_m.repeat(batch_size, 1, 1)
+        # init_state = torch.stack([torch.eye(self.mem_slots) for _ in range(batch_size)])
 
         # pad the matrix with zeros
         if self.mem_size > self.mem_slots:

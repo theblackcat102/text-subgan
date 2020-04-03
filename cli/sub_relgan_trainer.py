@@ -6,9 +6,10 @@ from tqdm import tqdm
 import os, glob, json
 import config as cfg
 
-from module.relgan_d import RelGAN_D
-from module.relgan_g import RelGAN_G
-from dataset import TextDataset, seq_collate
+from module.relgan_d import RelSpaceGAN_D
+from module.cluster import Cluster
+from module.relgan_g import RelSpaceG
+from dataset import TextSubspaceDataset, seq_collate
 from constant import Constants
 from utils import get_fixed_temperature, get_losses
 import numpy as np
@@ -22,12 +23,14 @@ def data_iter(dataloader):
                 yield batch
     return function()
 
-class RelGANTrainer():
+K_BINS = 5
+
+class SubSpaceRelGANTrainer():
 
 
     def __init__(self, args):
-        self.dataset = TextDataset(-1, 'data/kkday_dataset/train_title.txt', prefix='train_title', embedding=None, 
-            max_length=args.max_seq_len, force_fix_len=args.grad_penalty or args.full_text)
+        self.dataset = TextSubspaceDataset(-1, 'data/kkday_dataset/train_title.txt', prefix='train_title', embedding=None, 
+            max_length=args.max_seq_len, force_fix_len=args.grad_penalty or args.full_text, k_bins=K_BINS)
         dataset = self.dataset
         self.dataloader = data_iter(torch.utils.data.DataLoader(self.dataset, num_workers=4,
                         collate_fn=seq_collate, batch_size=args.batch_size, shuffle=True))
@@ -35,25 +38,33 @@ class RelGANTrainer():
         self.pretrain_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=4,
                         collate_fn=seq_collate, batch_size=args.batch_size*4, shuffle=True)
 
-        self.G = RelGAN_G(args.mem_slots, args.num_heads, args.head_size, args.gen_embed_dim, 
+        self.G = RelSpaceG(args.mem_slots, args.num_heads, args.head_size, args.gen_embed_dim, 
             args.gen_hidden_dim, dataset.vocab_size,
-            max_seq_len=args.max_seq_len-1, padding_idx=Constants.PAD, gpu=True, model_type=args.gen_model_type)
-        self.D = RelGAN_D(args.dis_embed_dim, args.max_seq_len-1, args.num_rep, dataset.vocab_size, Constants.PAD,
-            gpu=True, dropout=0.25)
+            k_bins=5, latent_dim=args.gen_latent_dim, noise_dim=args.gen_noise_dim,
+            max_seq_len=args.max_seq_len-1, padding_idx=Constants.PAD, gpu=True)
+        self.D = RelSpaceGAN_D(args.dis_embed_dim, args.max_seq_len-1, args.num_rep, dataset.vocab_size, Constants.PAD,
+            kbins=K_BINS, gpu=True, dropout=0.25)
+        self.C = Cluster(self.D.embeddings, args.dis_embed_dim, embed_dim=100, k_bins=K_BINS, output_embed_dim=100)
+        self.k_bins = K_BINS
+        self.C.cuda()
         self.G.cuda()
         self.D.cuda()
+
         args.vocab_size = dataset.vocab_size
-        
         self.args = args
-        self.args.name = args.name + '-' + args.gen_model_type
+
+        # self.cluster_opt = optim.Adam(self.C.parameters(), lr=args.dis_lr)
         self.gen_opt  = optim.Adam(self.G.parameters(), lr=args.gen_lr)
-        self.gen_adv_opt  = optim.Adam(self.G.parameters(), lr=args.gen_adv_lr)
+        self.gen_adv_opt  = optim.Adam(list(self.G.parameters()) + list(self.C.parameters()), lr=args.gen_adv_lr)
         self.dis_opt  = optim.Adam(self.D.parameters(), lr=args.dis_lr)
 
         self.mle_criterion = nn.NLLLoss()
+        self.KL_criterion = nn.KLDivLoss()
         self.dis_criterion = nn.CrossEntropyLoss()
 
         self.data_iterator = data_iter(self.dataloader)
+
+        self.bins_weight = self.dataset.calculate_stats().cuda()
 
 
     def pretrain_generator(self, epochs, writer=None):
@@ -63,9 +74,14 @@ class RelGANTrainer():
             with tqdm(total=len(self.pretrain_dataloader), dynamic_ncols=True) as pbar:
                 for batch in self.pretrain_dataloader:
                     inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
+                    kbins, latent = batch['bins'], batch['latents']
+                    kbins = F.one_hot(kbins, self.k_bins).float()
+
                     inputs, target = inputs.cuda(), target.cuda()
+                    kbins, latent = kbins.cuda(), latent.cuda()
+                    
                     batch_size = inputs.shape[0]
-                    hidden = self.G.init_hidden(batch_size=batch_size)
+                    hidden = self.G.init_hidden(kbins, latent, batch_size=batch_size)
                     pred = self.G.forward(inputs, hidden, need_hidden=False)
                     self.gen_opt.zero_grad()
                     loss = self.mle_criterion(pred, target.flatten())
@@ -78,65 +94,100 @@ class RelGANTrainer():
                     if iter_ % cfg.pre_log_step == 0 and writer is not None:
                         writer.add_scalar('pretrain/loss', loss.item(), iter_)
 
-            torch.save(self.G.state_dict(), 'save/{}-relgan_G_pretrained.pt'.format(self.args.gen_model_type))
+            torch.save(self.G.state_dict(), 'save/subspace_relgan_G_pretrained.pt')
 
 
     def adv_train_generator(self, g_step=1):
         total_loss = 0
+        total_g_loss, total_bin_loss = 0, 0
+        g_step = min(g_step, 1)
+
         for step in range(g_step):
             batch = next(self.data_iterator)
             inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
-            batch_size = inputs.shape[0]
-
-            real_samples = F.one_hot(target, args.vocab_size).float()
-            gen_samples = self.G.sample(batch_size, batch_size, one_hot=True)
+            kbins, latent = batch['bins'], batch['latents']
+            kbins_ = F.one_hot(kbins, self.k_bins).float()
             if cfg.CUDA:
-                real_samples, gen_samples = real_samples.cuda(), gen_samples.cuda()
-            d_out_real = self.D(real_samples)
-            d_out_fake = self.D(gen_samples)
+                kbins_, latent = kbins_.cuda(), latent.cuda()
+                kbins = kbins.cuda()
+
+            batch_size = inputs.shape[0]
+            real_samples = F.one_hot(target, args.vocab_size).float()
+            if cfg.CUDA:
+                real_samples = real_samples.cuda()
+            norm_kbins_ = F.softmax(kbins_ / self.bins_weight.expand(batch_size, self.k_bins), dim=1)
+
+            d_out_real, kbins_real, embed_real = self.D(real_samples)
+
+            # Train cluster module
+            c_logits, _ = self.C(real_samples, embed_real)
+
+            gen_samples = self.G.sample(kbins_, latent, batch_size, batch_size, one_hot=True)
+
+            d_out_fake, kbins_fake, embed_fake = self.D(gen_samples)
             g_loss, _ = get_losses(d_out_real, d_out_fake, self.args.loss_type)
+            bin_loss = self.dis_criterion(kbins_fake, kbins)
+            c_loss = self.KL_criterion(c_logits, norm_kbins_) / batch_size
+
+            loss = g_loss + bin_loss + c_loss
 
             self.gen_adv_opt.zero_grad()
-            g_loss.backward(retain_graph=False)
+            loss.backward(retain_graph=False)
             torch.nn.utils.clip_grad_norm_(self.G.parameters(), cfg.clip_norm)
             self.gen_adv_opt.step()
 
-            total_loss += g_loss.item()
+            total_g_loss += g_loss.item()
+            total_bin_loss += bin_loss.item()
+            total_loss += loss.item()
 
-        return total_loss / g_step if g_step != 0 else 0
+        return total_loss / g_step, total_g_loss / g_step, total_bin_loss / g_step
 
     def adv_train_discriminator(self, d_step=1):
         total_loss = 0
+        total_bin_loss, total_d_loss = 0, 0
+        d_step = min(d_step, 1)
         for step in range(d_step):
             batch = next(self.data_iterator)
             inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
+            kbins, latent = batch['bins'], batch['latents']
+            kbins_ = F.one_hot(kbins, self.k_bins).float()
+            if cfg.CUDA:
+                kbins_, latent = kbins_.cuda(), latent.cuda()
+                kbins = kbins.cuda()
+
             batch_size = inputs.shape[0]
             real_samples = F.one_hot(target, args.vocab_size).float()
             with torch.no_grad():
-                gen_samples = self.G.sample(batch_size, batch_size, one_hot=True)
+                gen_samples = self.G.sample(kbins_, latent, batch_size, batch_size, one_hot=True)
+
             if cfg.CUDA:
-                real_samples, gen_samples = real_samples.cuda(), gen_samples.cuda()
+                real_samples = real_samples.cuda()
 
             # ===Train===
-            d_out_real = self.D(real_samples)
-            d_out_fake = self.D(gen_samples.detach())
+            d_out_real, kbins_real, embed_real = self.D(real_samples)
+            d_out_fake, kbins_fake, embed_fake = self.D(gen_samples.detach())
             _, d_loss = get_losses(d_out_real, d_out_fake, self.args.loss_type)
 
             if self.args.grad_penalty:
                 d_gp_loss = gradient_penalty(self.D, real_samples, gen_samples.detach())
                 d_loss += self.args.gp_weight*d_gp_loss
 
+            bin_loss = self.dis_criterion(kbins_real, kbins)
+
+            loss = d_loss + bin_loss
             self.dis_opt.zero_grad()
-            d_loss.backward(retain_graph=False)
+            loss.backward(retain_graph=False)
             torch.nn.utils.clip_grad_norm_(self.D.parameters(), cfg.clip_norm)
             self.dis_opt.step()
 
-            total_loss += d_loss.item()
+            total_loss += loss.item()
+            total_bin_loss += bin_loss.item()
+            total_d_loss += d_loss.item()
 
-        return total_loss / d_step if d_step != 0 else 0
+        return total_loss / d_step, total_d_loss / d_step, total_bin_loss / d_step
 
     def sample_results(self, writer, step=0):
-        results = self.G.sample(10, 10)
+        results = self.G.sample(self.z_bins[:10, :], self.z_latents[:10, :], 10, 10)
         samples = ''
         for idx, sent in enumerate(results):
             sentence = []
@@ -159,24 +210,31 @@ class RelGANTrainer():
     def train(self):
         from datetime import datetime
         cur_time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-        save_path = 'save/{}-{}'.format(self.args.name, cur_time)
+        save_path = 'save/sub{}-{}'.format(self.args.name, cur_time)
         os.makedirs(save_path, exist_ok=True)
         with open(os.path.join(save_path, 'params.json'), 'w') as f:
             json.dump(vars(self.args), f)
-        writer = SummaryWriter('logs/{}-{}'.format(self.args.name, cur_time))
+        writer = SummaryWriter('logs/sub{}-{}'.format(self.args.name, cur_time))
         print('Pretrain stage....')
         if args.pretrain_gen is not None:
             gen_dict = torch.load(args.pretrain_gen)
             self.G.load_state_dict(gen_dict)
         else:
             self.pretrain_generator(args.pretrain_epochs, writer=writer)
+        batch = next(self.data_iterator)
+        z_bins, z_latents = batch['bins'], batch['latents']
+        z_bins = F.one_hot(z_bins, self.k_bins).float()
+
+        # fix latent feature
+        self.z_bins, self.z_latents = z_bins.cuda(), z_latents.cuda()
+        
 
         with tqdm(total=args.iterations, dynamic_ncols=True) as pbar:
             for i in range(args.iterations):
                 self.D.train()
-                d_loss = self.adv_train_discriminator(d_step=self.args.dis_steps)
+                d_t_loss, d_loss, d_bin_loss = self.adv_train_discriminator(d_step=self.args.dis_steps)
                 self.G.train()
-                g_loss = self.adv_train_generator(g_step=self.args.gen_steps)
+                g_t_loss, g_loss, g_bin_loss = self.adv_train_generator(g_step=self.args.gen_steps)
 
                 self.update_temp(i, args.iterations)
                 pbar.set_description(
@@ -192,9 +250,16 @@ class RelGANTrainer():
                     }, os.path.join(save_path,'optimizers.pt'))
 
                 if i % cfg.adv_log_step == 0 and writer != None:
-                    writer.add_scalar('G/loss', g_loss, i)
-                    writer.add_scalar('D/loss', d_loss, i)
+                    writer.add_scalar('G/loss', g_t_loss, i)
+                    writer.add_scalar('G/g_loss', g_loss, i)
+                    writer.add_scalar('G/bin_loss', g_bin_loss, i)
                     writer.add_scalar('G/temp', self.G.temperature, i)
+
+                    writer.add_scalar('D/loss', d_t_loss, i)
+                    writer.add_scalar('D/d_loss', d_loss, i)
+                    writer.add_scalar('D/bin_loss', d_bin_loss, i)
+
+
                 pbar.update(1)
                 if i % 100 == 0:
                     curr_temp = self.G.temperature
@@ -238,9 +303,9 @@ if __name__ == "__main__":
 
     parser.add_argument('--head-size', type=int, default=256)
     parser.add_argument('--mem-slots', type=int, default=1)
-
     parser.add_argument('--num-heads', type=int, default=2)
-
+    parser.add_argument('--gen-noise-dim', type=int, default=100)
+    parser.add_argument('--gen-latent-dim', type=int, default=5)
     parser.add_argument('--gen-embed-dim', type=int, default=64)
     parser.add_argument('--gen-hidden-dim', type=int, default=128)
     parser.add_argument('--dis-embed-dim', type=int, default=64)
@@ -249,8 +314,6 @@ if __name__ == "__main__":
 
     parser.add_argument('--temperature-min', type=float, default=0.1)
     parser.add_argument('--anneal-rate', type=float, default=0.00002)
-    parser.add_argument('--gen-model-type', type=str, default='LSTM',
-         choices=['LSTM', 'RMC'], help='Generator module type')
 
     parser.add_argument('--gen-lr', type=float, default=0.0001)
     parser.add_argument('--gen-adv-lr', type=float, default=0.0001)
@@ -262,10 +325,11 @@ if __name__ == "__main__":
 
     parser.add_argument('--gp-weight', type=float, default=10)
 
-    parser.add_argument('--loss-type', type=str, default='rsgan', choices=['rsgan', 'wasstestein', 'hinge'])
+    parser.add_argument('--loss-type', type=str, default='rsgan', 
+                        choices=['rsgan', 'wasstestein', 'hinge'])
 
     args = parser.parse_args()
-    trainer = RelGANTrainer(args)
+    trainer = SubSpaceRelGANTrainer(args)
     # trainer.pretrain_generator(args.pretrain_epochs)
     trainer.train()
     # trainer._test()

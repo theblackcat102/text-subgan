@@ -17,14 +17,14 @@ from module.relational_rnn_general import RelationalMemory
 
 class RelGAN_G(LSTMGenerator):
     def __init__(self, mem_slots, num_heads, head_size, embedding_dim, hidden_dim, vocab_size, max_seq_len, padding_idx,
-                 gpu=False):
+                 gpu=False, model_type='RMC'):
         super(RelGAN_G, self).__init__(embedding_dim, hidden_dim, vocab_size, max_seq_len, padding_idx, gpu)
         self.name = 'relgan'
 
         self.temperature = 1.0  # init value is 1.0
-
+        self.model_type = model_type
         self.embeddings = nn.Embedding(vocab_size, embedding_dim, padding_idx=padding_idx)
-        if cfg.model_type == 'LSTM':
+        if model_type == 'LSTM':
             # LSTM
             self.hidden_dim = hidden_dim
             self.lstm = nn.LSTM(embedding_dim, self.hidden_dim, batch_first=True)
@@ -40,7 +40,7 @@ class RelGAN_G(LSTMGenerator):
         # pass
 
     def init_hidden(self, batch_size=cfg.batch_size):
-        if cfg.model_type == 'LSTM':
+        if self.model_type == 'LSTM':
             h = torch.zeros(1, batch_size, self.hidden_dim)
             c = torch.zeros(1, batch_size, self.hidden_dim)
 
@@ -126,12 +126,78 @@ class RelGAN_G(LSTMGenerator):
         return gumbel_t
 
 
+
+class RelSpaceG(RelGAN_G):
+    def __init__( self, mem_slots, num_heads, head_size, embedding_dim, hidden_dim, vocab_size, max_seq_len, padding_idx,
+                k_bins=5, latent_dim=100, noise_dim=100,
+                 gpu=False):
+        super(RelSpaceG, self).__init__(mem_slots, num_heads, head_size, embedding_dim, hidden_dim, vocab_size, max_seq_len, padding_idx,
+                 gpu, 'LSTM')
+        self.latent_proj = nn.Sequential(
+            nn.Linear(noise_dim+latent_dim+k_bins, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, hidden_dim)
+        )
+        self.noise_dim = noise_dim
+
+    def init_hidden(self, kbins, latents, batch_size=cfg.batch_size):
+        noise = torch.randn(batch_size, self.noise_dim)
+        if self.gpu:
+            noise = noise.cuda()
+        kbins = kbins
+        latents = latents
+        latent = torch.cat([noise, kbins, latents], axis=1)
+        latents = self.latent_proj(latent).unsqueeze(0).repeat(2, 1, 1)
+        h, c = latents[[0], :, :], latents[[1], :, :]
+        if self.gpu:
+            return h.cuda(), c.cuda()
+        else:
+            return h, c
+
+    def sample(self, kbins, latents, num_samples, batch_size, one_hot=False, start_letter=cfg.start_letter):
+        """
+        Sample from RelGAN Generator
+        - one_hot: if return pred of RelGAN, used for adversarial training
+        :return:
+            - all_preds: batch_size * seq_len * vocab_size, only use for a batch
+            - samples: all samples
+        """
+        global all_preds
+        num_batch = num_samples // batch_size + 1 if num_samples != batch_size else 1
+        samples = torch.zeros(num_batch * batch_size, self.max_seq_len).long()
+        if one_hot:
+            all_preds = torch.zeros(batch_size, self.max_seq_len, self.vocab_size)
+            if self.gpu:
+                all_preds = all_preds.cuda()
+
+        for b in range(num_batch):
+            hidden = self.init_hidden(kbins, latents, batch_size)
+            inp = torch.LongTensor([start_letter] * batch_size)
+            if self.gpu:
+                inp = inp.cuda()
+
+            for i in range(self.max_seq_len):
+                pred, hidden, next_token, _, _ = self.step(inp, hidden)
+                samples[b * batch_size:(b + 1) * batch_size, i] = next_token
+                if one_hot:
+                    all_preds[:, i] = pred
+                inp = next_token
+        samples = samples[:num_samples]  # num_samples * seq_len
+
+        if one_hot:
+            return all_preds  # batch_size * seq_len * vocab_size
+        return samples
+
+
 if __name__ == "__main__":
     from utils import gradient_penalty
-    G = RelGAN_G(mem_slots=5, num_heads=12, head_size=16, embedding_dim=18, hidden_dim=18, vocab_size=3600, max_seq_len=128, padding_idx=0,
-                 gpu=False)
+    G = RelSpaceG(mem_slots=5, num_heads=12, head_size=16, embedding_dim=18, hidden_dim=18, vocab_size=3600, max_seq_len=128, padding_idx=0,
+                 gpu=False)#, module_type='LSTM')
     data = torch.randint(0, 3600, (32, 128))
-    hidden = G.init_hidden(batch_size=32)
-    print(hidden.shape)
+    latents = torch.randn(32, 100)
+    kbins = torch.randn(32, 5)
+    hidden = G.init_hidden(kbins, latents,batch_size=32)
+    # print(hidden.shape)
     pred = G.forward(data, hidden, need_hidden=False)
     print(pred.shape)
