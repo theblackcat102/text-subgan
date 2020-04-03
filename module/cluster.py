@@ -23,8 +23,12 @@ class Cluster(nn.Module):
         )
         self.maxpool = nn.AdaptiveMaxPool1d(1)
         self.linear = nn.Linear(embedding_dim+embed_dim, 256)
-        self.logits = nn.Linear(256, k_bins)
-        self.output = nn.Linear(256, output_embed_dim)
+        self.output2embed = nn.Sequential(
+            nn.Linear(256, output_embed_dim),
+            nn.BatchNorm1d(output_embed_dim)
+        )
+        self.logits = nn.Linear(output_embed_dim, k_bins)
+
         self.relu = nn.ReLU()
 
     def forward(self, text, d_embedding):
@@ -38,8 +42,10 @@ class Cluster(nn.Module):
         latent = torch.cat([outputs, d_embedding], axis=1)
         out = self.linear(latent)
         out = self.relu(out)
-        logits = self.logits(out)
-        embed = self.output(out)
+        embed = self.output2embed(out)
+        embed = self.relu(embed)
+        logits = self.logits(embed)
+
         return logits, embed
 
 

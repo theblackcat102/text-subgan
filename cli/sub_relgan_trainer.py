@@ -25,7 +25,7 @@ def data_iter(dataloader):
                 yield batch
     return function()
 
-K_BINS = 20
+K_BINS = 5
 
 class SubSpaceRelGANTrainer():
 
@@ -183,7 +183,7 @@ class SubSpaceRelGANTrainer():
                 d_gp_loss = gradient_penalty(self.D, real_samples, gen_samples.detach())
                 d_loss += self.args.gp_weight*d_gp_loss
 
-            bin_loss = self.dis_criterion(kbins_real, c_bins)
+            bin_loss = self.dis_criterion(kbins_real, c_bins.detach())
 
             loss = d_loss + bin_loss
             self.dis_opt.zero_grad()
