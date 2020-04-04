@@ -29,7 +29,7 @@ class RelGANTrainer():
 
     def __init__(self, args):
         self.dataset = TextSubspaceDataset(-1, 'data/kkday_dataset/train_title.txt', prefix='train_title', embedding=None, 
-            max_length=args.max_seq_len, force_fix_len=args.grad_penalty or args.full_text)
+            max_length=args.max_seq_len, force_fix_len=args.grad_penalty or args.full_text, token_level=args.tokenize)
         dataset = self.dataset
         self.dataloader = data_iter(torch.utils.data.DataLoader(self.dataset, num_workers=4,
                         collate_fn=seq_collate, batch_size=args.batch_size, shuffle=True))
@@ -295,6 +295,7 @@ if __name__ == "__main__":
     parser.add_argument('--iterations', type=int, default=10000)
     parser.add_argument('--check-iter', type=int, default=1000, help='checkpoint every 1k')
     parser.add_argument('--bleu-iter', type=int, default=500, help='bleu evaluation step')
+    parser.add_argument('--tokenize', '-t', type=str, default='word', choices=['word', 'char'])
     parser.add_argument('--pretrain-gen', type=str, default=None)
     parser.add_argument('--gen-steps', type=int, default=1)
     parser.add_argument('--dis-steps', type=int, default=1)

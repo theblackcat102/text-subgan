@@ -17,7 +17,7 @@ class TextDataset(Dataset):
         self.chunk_size = chunk_size
         self.embedding = embedding
         self.force_fix_len = force_fix_len
-
+        assert token_level in ['word', 'char']
         if token_level == 'word':
             tokenizer = WordTokenizer()
         else:
