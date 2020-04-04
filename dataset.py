@@ -80,6 +80,7 @@ class TextSubspaceDataset(Dataset):
         self.embedding = embedding
         self.force_fix_len = force_fix_len
         self.k_bins = k_bins
+        self.max_length = max_length
         self.idx2word = pickle.load(
             open(os.path.join(CACHE_DIR, "idx2word.pkl"), 'rb'))
         self.word2idx = pickle.load(

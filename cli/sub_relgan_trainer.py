@@ -293,7 +293,7 @@ class SubSpaceRelGANTrainer():
 
         # fix latent feature
         self.z_bins, self.z_latents = z_bins.cuda(), z_latents.cuda()
-        resample_freq = 1000
+        resample_freq = len(self.dataset) // self.args.batch_size
         print(resample_freq)
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
