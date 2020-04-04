@@ -25,7 +25,7 @@ def data_iter(dataloader):
                 yield batch
     return function()
 
-K_BINS = 5
+K_BINS = 20
 
 class SubSpaceRelGANTrainer():
 
