@@ -57,8 +57,12 @@ class SubSpaceRelGANTrainer():
 
         # self.cluster_opt = optim.Adam(self.C.parameters(), lr=args.dis_lr)
         self.gen_opt  = optim.Adam(self.G.parameters(), lr=args.gen_lr)
-        self.gen_adv_opt  = optim.Adam(list(self.G.parameters()) + list(self.C.parameters()), lr=args.gen_adv_lr)
-        self.dis_opt  = optim.Adam(self.D.parameters(), lr=args.dis_lr)
+        if args.loss_type == 'wasstestein':
+            self.gen_adv_opt  = optim.RMSprop(list(self.G.parameters()) + list(self.C.parameters()), lr=args.gen_adv_lr)
+            self.dis_opt  = optim.RMSprop(self.D.parameters(), lr=args.dis_lr)
+        else:
+            self.gen_adv_opt  = optim.Adam(list(self.G.parameters()) + list(self.C.parameters()), lr=args.gen_adv_lr, betas=(0.5, 0.999))
+            self.dis_opt  = optim.Adam(self.D.parameters(), lr=args.dis_lr, betas=(0.5, 0.999))
 
         self.mle_criterion = nn.NLLLoss()
         self.KL_criterion = nn.KLDivLoss(reduction='batchmean')
@@ -125,15 +129,15 @@ class SubSpaceRelGANTrainer():
             _c_logits, _ = self.C(real_samples, embed_real)
             c_logits = F.softmax(_c_logits, 1)
 
-            gen_samples = self.G.sample(c_logits, latent, batch_size, batch_size, one_hot=True)
-
+            gen_samples = self.G.sample(c_logits.detach(), latent, batch_size, batch_size, one_hot=True)
+            # backprop discriminator gradient back to generator via gumbel softmax
             d_out_fake, kbins_fake, embed_fake = self.D(gen_samples)
             g_loss, _ = get_losses(d_out_real, d_out_fake, self.args.loss_type)
             bin_loss = self.dis_criterion(kbins_fake, kbins)
             _c_logits = F.log_softmax(_c_logits)
             c_loss = self.KL_criterion(_c_logits, norm_kbins_)
 
-            loss = g_loss + bin_loss + c_loss
+            loss = g_loss + c_loss
 
             self.gen_adv_opt.zero_grad()
             loss.backward(retain_graph=False)
@@ -185,7 +189,7 @@ class SubSpaceRelGANTrainer():
 
             bin_loss = self.dis_criterion(kbins_real, c_bins.detach())
 
-            loss = d_loss + bin_loss
+            loss = d_loss
             self.dis_opt.zero_grad()
             loss.backward(retain_graph=False)
             torch.nn.utils.clip_grad_norm_(self.D.parameters(), cfg.clip_norm)
@@ -304,6 +308,10 @@ class SubSpaceRelGANTrainer():
 
                 if i % args.check_iter == 0:
                     torch.save(self.G.state_dict(), os.path.join(save_path,'relgan_G_{}.pt'.format(i)))
+                    torch.save({
+                        'p': self.dataset.p,
+                        'latent': self.dataset.latent,
+                    }, os.path.join(save_path,'latest_cluster_assignment.pt'))
                     torch.save(self.D.state_dict(), os.path.join(save_path,'relgan_D.pt'))
                     torch.save({
                         'gen_opt': self.gen_opt,
