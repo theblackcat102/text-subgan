@@ -75,29 +75,33 @@ def sort_by_length(seq, length, label):
 if __name__ == "__main__":
     import glob, os, pickle
     from collections import defaultdict
+    from tokenizer import CharTokenizer, WordTokenizer
     word2freq = defaultdict(int)
     training_filename = 'data/kkday_dataset/train_title.txt'
+    corpus = []
     with open(training_filename, 'r') as f:
         for line in f.readlines():
-            tokens = line.strip().split(' ')
-            for t in tokens:
-                word2freq[t] += 1
-    training_filename = 'data/kkday_dataset/train_article.txt'
-    with open(training_filename, 'r') as f:
-        for line in f.readlines():
-            tokens = line.strip().split(' ')
-            for t in tokens:
-                word2freq[t] += 1
+            corpus.append(line.strip())
+    tokenizer = CharTokenizer(corpus)
+    tokenizer = WordTokenizer(corpus)
 
-    word2idx = Constants.word2idx()
-    # print(len(word2freq))
-    for key, freq in word2freq.items():
-        word2idx[key] = len(word2idx)
-    idx2word = Constants.idx2word()
-    for token, idx in word2idx.items():
-        idx2word[idx] = token
 
-    with open(os.path.join(CACHE_DIR, "word2idx.pkl"), 'wb') as f:
-        pickle.dump(word2idx, f)
-    with open(os.path.join(CACHE_DIR, "idx2word.pkl"), 'wb') as f:
-        pickle.dump(idx2word, f)
+    # training_filename = 'data/kkday_dataset/train_article.txt'
+    # with open(training_filename, 'r') as f:
+    #     for line in f.readlines():
+    #         tokens = line.strip().split(' ')
+    #         for t in tokens:
+    #             word2freq[t] += 1
+
+    # word2idx = Constants.word2idx()
+    # # print(len(word2freq))
+    # for key, freq in word2freq.items():
+    #     word2idx[key] = len(word2idx)
+    # idx2word = Constants.idx2word()
+    # for token, idx in word2idx.items():
+    #     idx2word[idx] = token
+
+    # with open(os.path.join(CACHE_DIR, "word2idx.pkl"), 'wb') as f:
+    #     pickle.dump(word2idx, f)
+    # with open(os.path.join(CACHE_DIR, "idx2word.pkl"), 'wb') as f:
+    #     pickle.dump(idx2word, f)

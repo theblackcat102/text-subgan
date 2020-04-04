@@ -8,12 +8,14 @@ import config as cfg
 
 from module.relgan_d import RelGAN_D
 from module.relgan_g import RelGAN_G
-from dataset import TextDataset, seq_collate
+from dataset import TextSubspaceDataset, seq_collate
 from constant import Constants
 from utils import get_fixed_temperature, get_losses
 import numpy as np
 from tensorboardX import SummaryWriter
 from utils import gradient_penalty, str2bool
+from nltk.translate.bleu_score import sentence_bleu
+
 
 def data_iter(dataloader):
     def function():
@@ -26,7 +28,7 @@ class RelGANTrainer():
 
 
     def __init__(self, args):
-        self.dataset = TextDataset(-1, 'data/kkday_dataset/train_title.txt', prefix='train_title', embedding=None, 
+        self.dataset = TextSubspaceDataset(-1, 'data/kkday_dataset/train_title.txt', prefix='train_title', embedding=None, 
             max_length=args.max_seq_len, force_fix_len=args.grad_penalty or args.full_text)
         dataset = self.dataset
         self.dataloader = data_iter(torch.utils.data.DataLoader(self.dataset, num_workers=4,
@@ -150,6 +152,58 @@ class RelGANTrainer():
             writer.add_text("Text", samples, step)
             writer.flush()
 
+    def calculate_bleu(self, writer, step=0, size=2000):
+        '''
+            writer: tensorboardX writer
+            step: which iteration step
+            size: compare a total of 1k sentences
+        '''
+        eval_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=4,
+                        collate_fn=seq_collate, batch_size=20, shuffle=False)
+        sentences, references = [], []
+        scores_weights = { str(gram): [1/gram] * gram for gram in range(1, 4)  }
+        scores = { str(gram): 0 for gram in range(1, 4)  }
+        # print('Evaluate bleu scores', scores)
+        with torch.no_grad():
+            for batch in eval_dataloader:
+                inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
+                batch_size = inputs.shape[0]
+                results = self.G.sample(batch_size, batch_size)
+
+                for idx, sent_token in enumerate(batch['seq'][:, 1:]):
+                    reference = []
+                    for token in sent_token:
+                        if token.item() == Constants.EOS:
+                            break
+                        reference.append(self.dataset.idx2word[token.item()] )
+                    references.append(reference)
+
+                    sent = results[idx]
+                    sentence = []
+                    for token in sent:
+                        if token.item() == Constants.EOS:
+                            break
+                        sentence.append(  self.dataset.idx2word[token.item()])
+                    sentences.append(sentence)
+                    for key, weights in scores_weights.items():
+                        scores[key] += sentence_bleu([reference], sentence, weights)
+                if len(sentences) > size:
+                    break
+
+        with open(os.path.join(self.save_path, '{}_reference.txt'.format(step)), 'w') as f:
+            for sent in references:
+                f.write(' '.join(sent)+'\n')
+
+        with open(os.path.join(self.save_path, '{}_generate.txt'.format(step)), 'w') as f:
+            for sent in sentences:
+                f.write(' '.join(sent)+'\n')
+
+        if writer != None:
+            for key, weights in scores.items():
+                scores[key] /= len(sentences)
+                writer.add_scalar("Bleu/score-"+key, scores[key], step)
+            writer.flush()
+
     def _test(self):
         print(">start test")
         from time import time
@@ -160,6 +214,7 @@ class RelGANTrainer():
         from datetime import datetime
         cur_time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
         save_path = 'save/{}-{}'.format(self.args.name, cur_time)
+        self.save_path = save_path
         os.makedirs(save_path, exist_ok=True)
         with open(os.path.join(save_path, 'params.json'), 'w') as f:
             json.dump(vars(self.args), f)
@@ -195,6 +250,15 @@ class RelGANTrainer():
                     writer.add_scalar('G/loss', g_loss, i)
                     writer.add_scalar('D/loss', d_loss, i)
                     writer.add_scalar('G/temp', self.G.temperature, i)
+
+                if i % self.args.bleu_iter == 0:
+                    curr_temp = self.G.temperature
+                    self.G.temperature = 1.0
+                    self.G.eval()
+                    self.calculate_bleu(writer, i)
+                    self.G.temperature = curr_temp
+                    self.G.train()
+
                 pbar.update(1)
                 if i % 100 == 0:
                     curr_temp = self.G.temperature
@@ -230,6 +294,7 @@ if __name__ == "__main__":
     parser.add_argument('--pretrain-epochs', type=int, default=30)
     parser.add_argument('--iterations', type=int, default=10000)
     parser.add_argument('--check-iter', type=int, default=1000, help='checkpoint every 1k')
+    parser.add_argument('--bleu-iter', type=int, default=500, help='bleu evaluation step')
     parser.add_argument('--pretrain-gen', type=str, default=None)
     parser.add_argument('--gen-steps', type=int, default=1)
     parser.add_argument('--dis-steps', type=int, default=1)
@@ -244,7 +309,7 @@ if __name__ == "__main__":
     parser.add_argument('--gen-embed-dim', type=int, default=64)
     parser.add_argument('--gen-hidden-dim', type=int, default=128)
     parser.add_argument('--dis-embed-dim', type=int, default=64)
-    parser.add_argument('--max-seq-len', type=int, default=128)
+    parser.add_argument('--max-seq-len', type=int, default=50)
     parser.add_argument('--num-rep', type=int, default=64)
 
     parser.add_argument('--temperature-min', type=float, default=0.1)

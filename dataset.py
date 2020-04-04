@@ -10,18 +10,24 @@ from preprocess import clean_text, segment_text, pad_sequence
 from constant import (
     CACHE_DIR, DCARD_DATA, PTT_DATA, DCARD_WHITE_LIST, PTT_WHITE_LIST,
     MAX_LENGTH, Constants)
-
+from tokenizer import CharTokenizer, WordTokenizer
 
 class TextDataset(Dataset):
-    def __init__(self, chunk_size, filename, prefix, embedding, max_length, force_fix_len=False):
+    def __init__(self, chunk_size, filename, prefix, embedding, max_length, force_fix_len=False, token_level='word'):
         self.chunk_size = chunk_size
         self.embedding = embedding
         self.force_fix_len = force_fix_len
-        self.idx2word = pickle.load(
-            open(os.path.join(CACHE_DIR, "idx2word.pkl"), 'rb'))
-        self.word2idx = pickle.load(
-            open(os.path.join(CACHE_DIR, "word2idx.pkl"), 'rb'))
+
+        if token_level == 'word':
+            tokenizer = WordTokenizer()
+        else:
+            tokenizer = CharTokenizer()
+        prefix = token_level+'_'+prefix
+
+        self.idx2word = tokenizer.idx2word
+        self.word2idx = tokenizer.word2idx
         self.vocab_size = len(self.idx2word)
+        self.tokenizer = tokenizer
 
         cache_data_name = 'cache_{}_data.pkl'.format(prefix)
         if os.path.isfile(os.path.join(CACHE_DIR, cache_data_name)):
@@ -32,7 +38,7 @@ class TextDataset(Dataset):
             with open(filename, 'r', encoding='UTF-8') as f:
                 for line in f.readlines():
                     title = line.strip()
-                    title = title.split(' ')
+                    title = tokenizer.split(title)
                     if len(title) > 0 and len(title) < max_length:
                         encoded = []
                         for c in title:
@@ -75,17 +81,23 @@ class TextDataset(Dataset):
 
 
 class TextSubspaceDataset(Dataset):
-    def __init__(self, chunk_size, filename, prefix, embedding, max_length, k_bins=5,force_fix_len=False):
+    def __init__(self, chunk_size, filename, prefix, embedding, max_length, k_bins=5,force_fix_len=False, token_level='word'):
         self.chunk_size = chunk_size
         self.embedding = embedding
         self.force_fix_len = force_fix_len
         self.k_bins = k_bins
         self.max_length = max_length
-        self.idx2word = pickle.load(
-            open(os.path.join(CACHE_DIR, "idx2word.pkl"), 'rb'))
-        self.word2idx = pickle.load(
-            open(os.path.join(CACHE_DIR, "word2idx.pkl"), 'rb'))
+        if token_level == 'word':
+            tokenizer = WordTokenizer()
+        else:
+            tokenizer = CharTokenizer()
+        prefix = token_level+'_'+prefix
+
+        self.idx2word = tokenizer.idx2word
+        self.word2idx = tokenizer.word2idx
         self.vocab_size = len(self.idx2word)
+        self.tokenizer = tokenizer
+
         initial_cluster = 'initial_cluster_{}.pkl'.format(k_bins)
         if os.path.exists(initial_cluster):
             cluster = pickle.load(open(initial_cluster, 'rb'))
@@ -107,7 +119,7 @@ class TextSubspaceDataset(Dataset):
             with open(filename, 'r', encoding='UTF-8') as f:
                 for idx, line in enumerate(f.readlines()):
                     title_ = line.strip()
-                    title = title_.split(' ')
+                    title = tokenizer.split(title_)
                     if len(title) > 0 and len(title) < max_length:
                         encoded = []
                         self.p.append(cluster['p'][title_])
@@ -188,13 +200,13 @@ def seq_collate(batch): # only use for word index
 if __name__ == "__main__":
     import torch
 
-    dataset = TextSubspaceDataset(-1, 'data/kkday_dataset/train_title.txt', prefix='train_title', embedding=None, max_length=128)
+    dataset = TextSubspaceDataset(-1, 'data/kkday_dataset/train_title.txt', prefix='train_title', embedding=None, max_length=50, token_level='char')
     # dataset = TextDataset(-1, 'data/kkday_dataset/train_article.txt', prefix='train_article', embedding=None, max_length=256)
     # dataset = TextDataset(-1, 'data/kkday_dataset/valid_title.txt', prefix='valid_title', embedding=None, max_length=128)
     # dataset = TextDataset(-1, 'data/kkday_dataset/valid_article.txt', prefix='valid_article', embedding=None, max_length=256)
     # dataset = TextDataset(-1, 'data/kkday_dataset/test_title.txt', prefix='test_title', embedding=None, max_length=128)
     # dataset = TextDataset(-1, 'data/kkday_dataset/test_article.txt', prefix='test_article', embedding=None, max_length=256)
-    
+    print(dataset.vocab_size)
     dataloader = torch.utils.data.DataLoader(dataset, 
         collate_fn=seq_collate, batch_size=64)
     dataset.calculate_stats()

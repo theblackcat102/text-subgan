@@ -16,7 +16,7 @@ import numpy as np
 from tensorboardX import SummaryWriter
 from utils import gradient_penalty, str2bool, chunks
 from sklearn.manifold import SpectralEmbedding
-
+from nltk.translate.bleu_score import sentence_bleu
 
 def data_iter(dataloader):
     def function():
@@ -126,7 +126,7 @@ class SubSpaceRelGANTrainer():
             d_out_real, kbins_real, embed_real = self.D(real_samples)
 
             # Train cluster module
-            _c_logits, _ = self.C(real_samples, embed_real)
+            _c_logits, _ = self.C(real_samples, embed_real.detach())
             c_logits = F.softmax(_c_logits, 1)
 
             gen_samples = self.G.sample(c_logits.detach(), latent, batch_size, batch_size, one_hot=True)
@@ -216,6 +216,72 @@ class SubSpaceRelGANTrainer():
             writer.add_text("Text", samples, step)
             writer.flush()
 
+    def calculate_bleu(self, writer, step=0, size=5000):
+        '''
+            writer: tensorboardX writer
+            step: which iteration step
+            size: compare a total of 1k sentences
+        '''
+        eval_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=8,
+                        collate_fn=seq_collate, batch_size=20, shuffle=False)
+        sentences, references = [], []
+        scores_weights = { str(gram): [1/gram] * gram for gram in range(1, 4)  }
+        scores = { str(gram): 0 for gram in range(1, 4)  }
+
+        # print('Evaluate bleu scores', scores)
+        with torch.no_grad():
+            for batch in eval_dataloader:
+                inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
+                batch_size = inputs.shape[0]
+                kbins, latent = batch['bins'], batch['latents']
+                kbins = F.one_hot(kbins, self.k_bins).float()
+                target = target.cuda()
+                kbins, latent = kbins.cuda(), latent.cuda()
+                real_samples = F.one_hot(target, self.args.vocab_size).float()
+                if cfg.CUDA:
+                    real_samples = real_samples.cuda()
+
+                d_out_real, kbins_real, embed_real = self.D(real_samples)
+                c_logits, _ = self.C(real_samples, embed_real)
+                c_logits = F.softmax(c_logits, 1)
+                
+                results = self.G.sample(c_logits, latent, batch_size, batch_size)
+
+                for idx, sent_token in enumerate(batch['seq'][:, 1:]):
+                    reference = []
+                    for token in sent_token:
+                        if token.item() == Constants.EOS:
+                            break
+                        reference.append(self.dataset.idx2word[token.item()] )
+                    references.append(reference)
+
+                    sent = results[idx]
+                    sentence = []
+                    for token in sent:
+                        if token.item() == Constants.EOS:
+                            break
+                        sentence.append(  self.dataset.idx2word[token.item()])
+                    sentences.append(sentence)
+                    for key, weights in scores_weights.items():
+                        scores[key] += sentence_bleu([reference], sentence, weights)
+
+                if len(sentences) > size:
+                    break
+
+        with open(os.path.join(self.save_path, '{}_reference.txt'.format(step)), 'w') as f:
+            for sent in references:
+                f.write(' '.join(sent)+'\n')
+
+        with open(os.path.join(self.save_path, '{}_generate.txt'.format(step)), 'w') as f:
+            for sent in sentences:
+                f.write(' '.join(sent)+'\n')
+
+        if writer != None:
+            for key, weights in scores.items():
+                scores[key] /= len(sentences)
+                writer.add_scalar("Bleu/score-"+key, scores[key], step)
+            writer.flush()
+
     def _test(self):
         print(">start test")
         from time import time
@@ -278,6 +344,7 @@ class SubSpaceRelGANTrainer():
         cur_time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
         save_path = 'save/sub{}-{}'.format(self.args.name, cur_time)
         os.makedirs(save_path, exist_ok=True)
+        self.save_path = save_path
         with open(os.path.join(save_path, 'params.json'), 'w') as f:
             json.dump(vars(self.args), f)
         writer = SummaryWriter('logs/sub{}-{}'.format(self.args.name, cur_time))
@@ -339,6 +406,14 @@ class SubSpaceRelGANTrainer():
                     self.sample_results(writer, i)
                     self.G.temperature = curr_temp
                     self.G.train()
+
+                if i % self.args.bleu_iter == 0:
+                    curr_temp = self.G.temperature
+                    self.G.temperature = 1.0
+                    self.G.eval(), self.D.eval(), self.C.eval()
+                    self.calculate_bleu(writer, i)
+                    self.G.temperature = curr_temp
+                    self.G.train(), self.D.train(), self.C.train()
                 
                 if i % resample_freq == 0 and i > 0:
                     resample_freq = len(self.dataset) // self.args.batch_size
@@ -372,9 +447,11 @@ if __name__ == "__main__":
     parser.add_argument('--pretrain-epochs', type=int, default=30)
     parser.add_argument('--iterations', type=int, default=10000)
     parser.add_argument('--check-iter', type=int, default=1000, help='checkpoint every 1k')
+    parser.add_argument('--bleu-iter', type=int, default=400, help='bleu evaluation step')
     parser.add_argument('--pretrain-gen', type=str, default=None)
     parser.add_argument('--gen-steps', type=int, default=1)
     parser.add_argument('--dis-steps', type=int, default=1)
+    parser.add_argument('--tokenize', '-t', type=str, default='word', choices=['word', 'char'])
 
     parser.add_argument('--name', type=str, default='relgan')
 
