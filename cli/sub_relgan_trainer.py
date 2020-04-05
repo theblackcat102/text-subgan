@@ -18,6 +18,9 @@ from tensorboardX import SummaryWriter
 from utils import gradient_penalty, str2bool, chunks
 from sklearn.manifold import SpectralEmbedding
 from nltk.translate.bleu_score import sentence_bleu
+from nltk.translate.bleu_score import SmoothingFunction
+from shutil import copyfile
+
 
 def data_iter(dataloader):
     def function():
@@ -128,16 +131,17 @@ class SubSpaceRelGANTrainer():
             # Train cluster module
             _c_logits, _ = self.C(real_samples, embed_real.detach())
             c_logits = F.softmax(_c_logits, 1)
+            c_bins = torch.argmax(c_logits, 1).long()
 
             gen_samples = self.G.sample(c_logits.detach(), latent, batch_size, batch_size, one_hot=True)
             # backprop discriminator gradient back to generator via gumbel softmax
             d_out_fake, kbins_fake, embed_fake = self.D(gen_samples)
             g_loss, _ = get_losses(d_out_real, d_out_fake, self.args.loss_type)
-            bin_loss = self.dis_criterion(kbins_fake, kbins)
+            bin_loss = self.dis_criterion(kbins_fake, c_bins)
             _c_logits = F.log_softmax(_c_logits)
             c_loss = self.KL_criterion(_c_logits, norm_kbins_)
 
-            loss = g_loss + c_loss + bin_loss * 0.5
+            loss = g_loss + c_loss + bin_loss
 
             self.gen_adv_opt.zero_grad()
             loss.backward(retain_graph=False)
@@ -189,7 +193,7 @@ class SubSpaceRelGANTrainer():
 
             bin_loss = self.dis_criterion(kbins_real, c_bins.detach())
 
-            loss = d_loss + bin_loss * 0.5
+            loss = d_loss + bin_loss
             self.dis_opt.zero_grad()
             loss.backward(retain_graph=False)
             torch.nn.utils.clip_grad_norm_(self.D.parameters(), cfg.clip_norm)
@@ -263,12 +267,13 @@ class SubSpaceRelGANTrainer():
                         sentence.append(  self.dataset.idx2word[token.item()])
                     sentences.append(sentence)
                     for key, weights in scores_weights.items():
-                        scores[key] += sentence_bleu([reference], sentence, weights)
+                        scores[key] += sentence_bleu([reference], sentence, weights, 
+                            smoothing_function=SmoothingFunction().method1)
 
                 if len(sentences) > size:
                     break
 
-        with open(os.path.join(self.save_path, '{}_reference.txt'.format(step)), 'w') as f:
+        with open(os.path.join(self.save_path, '{}_reference.txt'.format(0)), 'w') as f:
             for sent in references:
                 f.write(' '.join(sent)+'\n')
 
@@ -343,6 +348,8 @@ class SubSpaceRelGANTrainer():
         cur_time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
         save_path = 'save/sub{}-{}'.format(self.args.name, cur_time)
         os.makedirs(save_path, exist_ok=True)
+        copyfile('module/relgan_d.py', os.path.join(save_path, 'relgan_d.py'))
+        copyfile('module/relgan_g.py', os.path.join(save_path, 'relgan_g.py'))
         self.save_path = save_path
         with open(os.path.join(save_path, 'params.json'), 'w') as f:
             json.dump(vars(self.args), f)
@@ -379,7 +386,11 @@ class SubSpaceRelGANTrainer():
                     'g_loss: %.4f, d_loss: %.4f, temp: %.4f' % (g_loss, d_loss, self.G.temperature))
 
                 if i % args.check_iter == 0:
-                    torch.save(self.G.state_dict(), os.path.join(save_path,'relgan_G_{}.pt'.format(i)))
+                    torch.save({
+                        'model': self.G.state_dict(),
+                        'p': self.dataset.p,
+                        'latent': self.dataset.latent,
+                    }, os.path.join(save_path,'relgan_G_{}.pt'.format(i)))
                     torch.save({
                         'kmeans': self.kmeans,
                         'p': self.dataset.p,

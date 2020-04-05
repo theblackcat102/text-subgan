@@ -15,6 +15,7 @@ import numpy as np
 from tensorboardX import SummaryWriter
 from utils import gradient_penalty, str2bool
 from nltk.translate.bleu_score import sentence_bleu
+from nltk.translate.bleu_score import SmoothingFunction
 
 
 def data_iter(dataloader):
@@ -152,7 +153,7 @@ class RelGANTrainer():
             writer.add_text("Text", samples, step)
             writer.flush()
 
-    def calculate_bleu(self, writer, step=0, size=2000):
+    def calculate_bleu(self, writer, step=0, size=10000):
         '''
             writer: tensorboardX writer
             step: which iteration step
@@ -161,8 +162,8 @@ class RelGANTrainer():
         eval_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=4,
                         collate_fn=seq_collate, batch_size=20, shuffle=False)
         sentences, references = [], []
-        scores_weights = { str(gram): [1/gram] * gram for gram in range(1, 4)  }
-        scores = { str(gram): 0 for gram in range(1, 4)  }
+        scores_weights = { str(gram): [1/gram] * gram for gram in range(1, 5)  }
+        scores = { str(gram): 0 for gram in range(1, 5)  }
         # print('Evaluate bleu scores', scores)
         with torch.no_grad():
             for batch in eval_dataloader:
@@ -186,11 +187,12 @@ class RelGANTrainer():
                         sentence.append(  self.dataset.idx2word[token.item()])
                     sentences.append(sentence)
                     for key, weights in scores_weights.items():
-                        scores[key] += sentence_bleu([reference], sentence, weights)
+                        scores[key] += sentence_bleu([reference], sentence, weights, 
+                            smoothing_function=SmoothingFunction().method1)
                 if len(sentences) > size:
                     break
 
-        with open(os.path.join(self.save_path, '{}_reference.txt'.format(step)), 'w') as f:
+        with open(os.path.join(self.save_path, '{}_reference.txt'.format(0)), 'w') as f:
             for sent in references:
                 f.write(' '.join(sent)+'\n')
 
@@ -216,6 +218,8 @@ class RelGANTrainer():
         save_path = 'save/{}-{}'.format(self.args.name, cur_time)
         self.save_path = save_path
         os.makedirs(save_path, exist_ok=True)
+        copyfile('module/relgan_d.py', os.path.join(save_path, 'relgan_d.py'))
+        copyfile('module/relgan_g.py', os.path.join(save_path, 'relgan_g.py'))
         with open(os.path.join(save_path, 'params.json'), 'w') as f:
             json.dump(vars(self.args), f)
         writer = SummaryWriter('logs/{}-{}'.format(self.args.name, cur_time))
