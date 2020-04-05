@@ -12,6 +12,7 @@ from module.relgan_g import RelSpaceG
 from dataset import TextSubspaceDataset, seq_collate
 from constant import Constants
 from utils import get_fixed_temperature, get_losses
+from sklearn.cluster import KMeans
 import numpy as np
 from tensorboardX import SummaryWriter
 from utils import gradient_penalty, str2bool, chunks
@@ -47,6 +48,8 @@ class SubSpaceRelGANTrainer():
         self.D = RelSpaceGAN_D(args.dis_embed_dim, args.max_seq_len-1, args.num_rep, dataset.vocab_size, Constants.PAD,
             kbins=K_BINS, gpu=True, dropout=0.25)
         self.C = Cluster(self.D.embeddings, args.dis_embed_dim, embed_dim=100, k_bins=K_BINS, output_embed_dim=100)
+        self.kmeans = KMeans(n_clusters=K_BINS, random_state=666)
+        self.dataset.p = self.kmeans.fit_predict(self.dataset.latent)
         self.k_bins = K_BINS
         self.C.cuda()
         self.G.cuda()
@@ -57,12 +60,9 @@ class SubSpaceRelGANTrainer():
 
         # self.cluster_opt = optim.Adam(self.C.parameters(), lr=args.dis_lr)
         self.gen_opt  = optim.Adam(self.G.parameters(), lr=args.gen_lr)
-        if args.loss_type == 'wasstestein':
-            self.gen_adv_opt  = optim.RMSprop(list(self.G.parameters()) + list(self.C.parameters()), lr=args.gen_adv_lr)
-            self.dis_opt  = optim.RMSprop(self.D.parameters(), lr=args.dis_lr)
-        else:
-            self.gen_adv_opt  = optim.Adam(list(self.G.parameters()) + list(self.C.parameters()), lr=args.gen_adv_lr, betas=(0.5, 0.999))
-            self.dis_opt  = optim.Adam(self.D.parameters(), lr=args.dis_lr, betas=(0.5, 0.999))
+
+        self.gen_adv_opt  = optim.Adam(list(self.G.parameters()) + list(self.C.parameters()), lr=args.gen_adv_lr, betas=(0.5, 0.999))
+        self.dis_opt  = optim.Adam(self.D.parameters(), lr=args.dis_lr, betas=(0.5, 0.999))
 
         self.mle_criterion = nn.NLLLoss()
         self.KL_criterion = nn.KLDivLoss(reduction='batchmean')
@@ -100,7 +100,7 @@ class SubSpaceRelGANTrainer():
                     if iter_ % cfg.pre_log_step == 0 and writer is not None:
                         writer.add_scalar('pretrain/loss', loss.item(), iter_)
 
-            torch.save(self.G.state_dict(), 'save/subspace_relgan_G_pretrained_{}.pt'.format(self.k_bins))
+            torch.save(self.G.state_dict(), 'save/subspace_relgan_G_pretrained_{}_{}.pt'.format(self.k_bins, self.args.tokenize))
 
     def adv_train_generator(self, g_step=1):
         total_loss = 0
@@ -137,7 +137,7 @@ class SubSpaceRelGANTrainer():
             _c_logits = F.log_softmax(_c_logits)
             c_loss = self.KL_criterion(_c_logits, norm_kbins_)
 
-            loss = g_loss + c_loss
+            loss = g_loss + c_loss + bin_loss * 0.5
 
             self.gen_adv_opt.zero_grad()
             loss.backward(retain_graph=False)
@@ -189,7 +189,7 @@ class SubSpaceRelGANTrainer():
 
             bin_loss = self.dis_criterion(kbins_real, c_bins.detach())
 
-            loss = d_loss
+            loss = d_loss + bin_loss * 0.5
             self.dis_opt.zero_grad()
             loss.backward(retain_graph=False)
             torch.nn.utils.clip_grad_norm_(self.D.parameters(), cfg.clip_norm)
@@ -309,8 +309,6 @@ class SubSpaceRelGANTrainer():
                 latents.append(embed.cpu())
                 P.append(torch.argmax(logits, 1).cpu())
                 iter_ += 1
-                # if iter_ > 10:
-                #     break
 
         latents = torch.cat(latents, 0).data.numpy()
         P = torch.cat(P).data.numpy()
@@ -323,10 +321,10 @@ class SubSpaceRelGANTrainer():
             context.append(embeddings)
         context = np.concatenate(context, axis=0)
         assert self.dataset.latent.shape == context.shape
-        assert self.dataset.p.shape == P.shape
+        # assert self.dataset.p.shape == P.shape
         # update latent space
         self.dataset.latent = context
-        self.dataset.p = P
+        self.dataset.p = self.kmeans.fit_predict(self.dataset.latent)
         # update P weights
         self.bins_weight = self.dataset.calculate_stats().cuda()
         self.D.train(), self.C.train()
@@ -340,6 +338,7 @@ class SubSpaceRelGANTrainer():
         self.z_bins, self.z_latents = z_bins.cuda(), z_latents.cuda()
 
     def train(self):
+        # initialize misc stuff, tensorboard, save path etc
         from datetime import datetime
         cur_time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
         save_path = 'save/sub{}-{}'.format(self.args.name, cur_time)
@@ -354,20 +353,26 @@ class SubSpaceRelGANTrainer():
             self.G.load_state_dict(gen_dict)
         else:
             self.pretrain_generator(args.pretrain_epochs, writer=writer)
+        # fix our latent feature for sampling
         batch = next(self.data_iterator)
         z_bins, z_latents = batch['bins'], batch['latents']
         z_bins = F.one_hot(z_bins, self.k_bins).float()
-
         # fix latent feature
         self.z_bins, self.z_latents = z_bins.cuda(), z_latents.cuda()
         resample_freq = len(self.dataset) // self.args.batch_size
         print(resample_freq)
+
+        # start training...
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
-                self.D.train()
-                d_t_loss, d_loss, d_bin_loss = self.adv_train_discriminator(d_step=self.args.dis_steps)
+
+                # update generator
                 self.G.train()
                 g_t_loss, g_loss, g_bin_loss, c_loss = self.adv_train_generator(g_step=self.args.gen_steps)
+
+                # update discriminator
+                self.D.train()
+                d_t_loss, d_loss, d_bin_loss = self.adv_train_discriminator(d_step=self.args.dis_steps)
 
                 self.update_temp(i, args.iterations)
                 pbar.set_description(
@@ -376,6 +381,7 @@ class SubSpaceRelGANTrainer():
                 if i % args.check_iter == 0:
                     torch.save(self.G.state_dict(), os.path.join(save_path,'relgan_G_{}.pt'.format(i)))
                     torch.save({
+                        'kmeans': self.kmeans,
                         'p': self.dataset.p,
                         'latent': self.dataset.latent,
                     }, os.path.join(save_path,'latest_cluster_assignment.pt'))
@@ -383,7 +389,7 @@ class SubSpaceRelGANTrainer():
                     torch.save({
                         'gen_opt': self.gen_opt,
                         'gen_adv_opt': self.gen_adv_opt,
-                        'dis_opt': self.dis_opt
+                        'dis_opt': self.dis_opt,
                     }, os.path.join(save_path,'optimizers.pt'))
 
                 if i % cfg.adv_log_step == 0 and writer != None:

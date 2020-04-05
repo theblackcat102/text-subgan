@@ -80,7 +80,7 @@ class RelGANTrainer():
                     if iter_ % cfg.pre_log_step == 0 and writer is not None:
                         writer.add_scalar('pretrain/loss', loss.item(), iter_)
 
-            torch.save(self.G.state_dict(), 'save/{}-relgan_G_pretrained.pt'.format(self.args.gen_model_type))
+            torch.save(self.G.state_dict(), 'save/{}-relgan_G_pretrained_{}.pt'.format(self.args.gen_model_type, self.args.tokenize))
 
 
     def adv_train_generator(self, g_step=1):
@@ -228,10 +228,10 @@ class RelGANTrainer():
 
         with tqdm(total=args.iterations, dynamic_ncols=True) as pbar:
             for i in range(args.iterations):
-                self.D.train()
-                d_loss = self.adv_train_discriminator(d_step=self.args.dis_steps)
                 self.G.train()
                 g_loss = self.adv_train_generator(g_step=self.args.gen_steps)
+                self.D.train()
+                d_loss = self.adv_train_discriminator(d_step=self.args.dis_steps)
 
                 self.update_temp(i, args.iterations)
                 pbar.set_description(
