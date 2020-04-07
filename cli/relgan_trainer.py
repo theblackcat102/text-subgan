@@ -295,7 +295,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('--batch-size', type=int, default=18)
     parser.add_argument('--clip-norm', type=float, default=1.0)
-    parser.add_argument('--pretrain-epochs', type=int, default=30)
+    parser.add_argument('--pretrain-epochs', type=int, default=100)
     parser.add_argument('--iterations', type=int, default=10000)
     parser.add_argument('--check-iter', type=int, default=1000, help='checkpoint every 1k')
     parser.add_argument('--bleu-iter', type=int, default=500, help='bleu evaluation step')

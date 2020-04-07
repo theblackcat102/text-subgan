@@ -13,6 +13,7 @@ from dataset import TextSubspaceDataset, seq_collate
 from constant import Constants
 from utils import get_fixed_temperature, get_losses
 from sklearn.cluster import KMeans
+import sklearn
 import numpy as np
 from tensorboardX import SummaryWriter
 from utils import gradient_penalty, str2bool, chunks
@@ -43,7 +44,7 @@ class SubSpaceRelGANTrainer():
 
         self.pretrain_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=4,
                         collate_fn=seq_collate, batch_size=args.batch_size*4, shuffle=True)
-
+        args.kbins = K_BINS
         self.G = RelSpaceG(args.mem_slots, args.num_heads, args.head_size, args.gen_embed_dim, 
             args.gen_hidden_dim, dataset.vocab_size,
             k_bins=K_BINS, latent_dim=args.gen_latent_dim, noise_dim=args.gen_noise_dim,
@@ -67,7 +68,7 @@ class SubSpaceRelGANTrainer():
         self.gen_adv_opt  = optim.Adam(list(self.G.parameters()) + list(self.C.parameters()), lr=args.gen_adv_lr, betas=(0.5, 0.999))
         self.dis_opt  = optim.Adam(self.D.parameters(), lr=args.dis_lr, betas=(0.5, 0.999))
 
-        self.mle_criterion = nn.NLLLoss()
+        self.mle_criterion = nn.NLLLoss(ignore_index=Constants.PAD)
         self.KL_criterion = nn.KLDivLoss(reduction='batchmean')
         self.dis_criterion = nn.CrossEntropyLoss()
 
@@ -138,10 +139,10 @@ class SubSpaceRelGANTrainer():
             d_out_fake, kbins_fake, embed_fake = self.D(gen_samples)
             g_loss, _ = get_losses(d_out_real, d_out_fake, self.args.loss_type)
             bin_loss = self.dis_criterion(kbins_fake, c_bins)
-            _c_logits = F.log_softmax(_c_logits)
+            _c_logits = F.log_softmax(_c_logits, dim=1)
             c_loss = self.KL_criterion(_c_logits, norm_kbins_)
 
-            loss = g_loss + c_loss + bin_loss
+            loss = g_loss + c_loss #+ bin_loss * 0.5
 
             self.gen_adv_opt.zero_grad()
             loss.backward(retain_graph=False)
@@ -164,6 +165,7 @@ class SubSpaceRelGANTrainer():
             inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
             kbins, latent = batch['bins'], batch['latents']
             # kbins_ = F.one_hot(kbins, self.k_bins).float()
+            # norm_kbins_ = F.softmax(kbins_ / self.bins_weight.expand(batch_size, self.k_bins), dim=1)
             if cfg.CUDA:
                 # kbins_ = kbins_.cuda()
                 latent = latent.cuda()
@@ -191,9 +193,9 @@ class SubSpaceRelGANTrainer():
                 d_gp_loss = gradient_penalty(self.D, real_samples, gen_samples.detach())
                 d_loss += self.args.gp_weight*d_gp_loss
 
-            bin_loss = self.dis_criterion(kbins_real, c_bins.detach())
+            bin_loss = self.dis_criterion(kbins_real, kbins)
 
-            loss = d_loss + bin_loss
+            loss = d_loss #+ bin_loss * 0.5
             self.dis_opt.zero_grad()
             loss.backward(retain_graph=False)
             torch.nn.utils.clip_grad_norm_(self.D.parameters(), cfg.clip_norm)
@@ -220,7 +222,7 @@ class SubSpaceRelGANTrainer():
             writer.add_text("Text", samples, step)
             writer.flush()
 
-    def calculate_bleu(self, writer, step=0, size=5000):
+    def calculate_bleu(self, writer, step=0, size=5000, ngram=4):
         '''
             writer: tensorboardX writer
             step: which iteration step
@@ -229,8 +231,8 @@ class SubSpaceRelGANTrainer():
         eval_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=8,
                         collate_fn=seq_collate, batch_size=20, shuffle=False)
         sentences, references = [], []
-        scores_weights = { str(gram): [1/gram] * gram for gram in range(1, 4)  }
-        scores = { str(gram): 0 for gram in range(1, 4)  }
+        scores_weights = { str(gram): [1/gram] * gram for gram in range(1, ngram+1)  }
+        scores = { str(gram): 0 for gram in range(1, ngram+1)  }
 
         # print('Evaluate bleu scores', scores)
         with torch.no_grad():
@@ -294,14 +296,14 @@ class SubSpaceRelGANTrainer():
         
 
     def update_latent(self):
-        print('Updating latent feature')
+        # print('Updating latent feature')
         eval_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=8,
                         collate_fn=seq_collate, batch_size=64, shuffle=False)
         latents, P = [], []
         self.D.eval(), self.C.eval()
         iter_ = 0
         with torch.no_grad():
-            for batch in tqdm(eval_dataloader, dynamic_ncols=True):
+            for batch in eval_dataloader:
                 inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
                 kbins, latent = batch['bins'], batch['latents']
                 target = target.cuda()
@@ -319,12 +321,15 @@ class SubSpaceRelGANTrainer():
         P = torch.cat(P).data.numpy()
 
         context = []
-        print('Calculate eigen latent features')
+        # print('Calculate eigen latent features')
         # 40000 use roughly 40G of memory so reduce this if your memory is lower than 64G
-        for latents_ in tqdm(chunks(latents, 40000), dynamic_ncols=True):
+        for latents_ in chunks(latents, 40000):
             embeddings = SpectralEmbedding(n_components=self.k_bins, affinity='rbf').fit_transform(latents_)
             context.append(embeddings)
+
         context = np.concatenate(context, axis=0)
+        ss = sklearn.preprocessing.StandardScaler(copy=False)
+        context = ss.fit_transform(context)
         assert self.dataset.latent.shape == context.shape
         # assert self.dataset.p.shape == P.shape
         # update latent space
@@ -372,14 +377,14 @@ class SubSpaceRelGANTrainer():
         # start training...
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
+                # update discriminator
+                self.D.train()
+                d_t_loss, d_loss, d_bin_loss = self.adv_train_discriminator(d_step=self.args.dis_steps)
 
                 # update generator
                 self.G.train()
                 g_t_loss, g_loss, g_bin_loss, c_loss = self.adv_train_generator(g_step=self.args.gen_steps)
 
-                # update discriminator
-                self.D.train()
-                d_t_loss, d_loss, d_bin_loss = self.adv_train_discriminator(d_step=self.args.dis_steps)
 
                 self.update_temp(i, args.iterations)
                 pbar.set_description(
@@ -432,7 +437,7 @@ class SubSpaceRelGANTrainer():
                     self.G.temperature = curr_temp
                     self.G.train(), self.D.train(), self.C.train()
                 
-                if i % resample_freq == 0 and i > 0:
+                if i % resample_freq == 0 and i > 0 and self.args.update_latent:
                     resample_freq = len(self.dataset) // self.args.batch_size
                     self.update_latent()
 
@@ -461,7 +466,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--clip-norm', type=float, default=1.0)
-    parser.add_argument('--pretrain-epochs', type=int, default=30)
+    parser.add_argument('--pretrain-epochs', type=int, default=100)
     parser.add_argument('--iterations', type=int, default=10000)
     parser.add_argument('--check-iter', type=int, default=1000, help='checkpoint every 1k')
     parser.add_argument('--bleu-iter', type=int, default=400, help='bleu evaluation step')
@@ -488,11 +493,13 @@ if __name__ == "__main__":
 
     parser.add_argument('--gen-lr', type=float, default=0.0001)
     parser.add_argument('--gen-adv-lr', type=float, default=0.0001)
-    parser.add_argument('--dis-lr', type=float, default=0.0003)
+    parser.add_argument('--dis-lr', type=float, default=0.0004)
     parser.add_argument('--grad-penalty', type=str2bool, nargs='?',
                         default=False, help='Apply gradient penalty')
     parser.add_argument('--full-text', type=str2bool, nargs='?',
                         default=False, help='Dataset return full max length')
+    parser.add_argument('--update-latent', type=str2bool, nargs='?',
+                        default=True, help='Update latent assignment every epoch?')
 
     parser.add_argument('--gp-weight', type=float, default=10)
 

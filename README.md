@@ -24,3 +24,27 @@
 ```
 python -m cli.sub_relgan_trainer  --name char-no-bin-wgan --iterations 100000 --max-seq-len 50 --batch-size 128 --tokenize char --loss-type wasstestein --pretrain-gen save/subspace_relgan_G_pretrained_20_char.pt --dis-lr 0.0001 --dis-steps 7
 ```
+
+### Rust Logs:
+
+```
+python -W ignore -m cli.sub_relgan_trainer  --name relgan-gp-bin-loss-0.5-kmeans --pretrain-epochs 60 --iterations 200000 --max-seq-len 40 --batch-size 64 --full-text True --grad-penalty True --pretrain-gen save/subspace_relgan_G_pretrained_20_word.pt
+```
+
+## Server Logs:
+
+```
+python -m cli.sub_relgan_trainer  --name relgan-bin-loss-0.5-kmeans --pretrain-epochs 60 --iterations 200000 --max-seq-len 40 --batch-size 64
+```
+
+
+Note:
+
+subrelgan-bin-loss-0.5-kmeans-2020-04-07-01-33-53
+
+Discriminator bin loss came from clusterer output
+
+
+subrelgan-bin-loss-0.5-kmeans-2020-04-07-06-00-03
+
+Discriminator bin loss came from label ( precalculated )

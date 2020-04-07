@@ -8,7 +8,7 @@ import glob, os
 import pickle
 from sklearn.manifold import SpectralEmbedding
 from utils import chunks
-
+import sklearn
 
 '''
     Initialize the clustering of corpus
@@ -59,6 +59,11 @@ def correlation_matrix(corpus, n_components):
     return embeddings
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description='Process some integers.')
+    parser.add_argument('--components', type=int, default=20)
+    args = parser.parse_args()
+
     if os.path.exists('title_corpus.pkl'):
         corpus = pickle.load(open('title_corpus.pkl', 'rb'))
     else:
@@ -67,9 +72,8 @@ if __name__ == "__main__":
         with open('title_corpus.pkl', 'wb') as f:
             pickle.dump(corpus, f)
 
-    print('calculate C')
-    
-    n_components = 20
+    print('calculate C : {}'.format(args.components))
+    n_components = args.components
     context = []
     tfidf = TfidfVectorizer().fit_transform(corpus)
     for corpus_ in chunks(tfidf, 42000):
@@ -78,6 +82,8 @@ if __name__ == "__main__":
         context.append(C)
 
     context = np.concatenate(context, axis=0)
+    ss = sklearn.preprocessing.StandardScaler(copy=False)
+    context = ss.fit_transform(context)
     kmeans = KMeans(n_clusters=n_components)
     cluster_assignment = kmeans.fit_predict(context)
     with open('latent_variable_{}.pkl'.format(n_components), 'wb') as f:

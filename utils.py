@@ -126,6 +126,8 @@ def gradient_penalty(netD, real_data, fake_data):
     interpolates = alpha * real_data + ((1 - alpha) * fake_data)
     interpolates.requires_grad = True
     disc_interpolates = netD(interpolates)
+    if isinstance(disc_interpolates, tuple):
+        disc_interpolates = disc_interpolates[0]
 
     ones = torch.ones(disc_interpolates.size())
     if torch.cuda.is_available():
@@ -136,7 +138,7 @@ def gradient_penalty(netD, real_data, fake_data):
         grad_outputs=ones,
         create_graph=True, retain_graph=True, only_inputs=True)[0]
     gradients_norm = torch.sqrt(torch.sum(gradients ** 2, dim=[1, 2]))
-    gradient_penalty = ((gradients_norm - 1) ** 2).mean()
+    gradient_penalty = ((gradients_norm - 0) ** 2).mean()
     return gradient_penalty
 
 
