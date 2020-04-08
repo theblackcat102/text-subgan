@@ -143,6 +143,8 @@ class SubSpaceRelGANTrainer():
             c_loss = self.KL_criterion(_c_logits, norm_kbins_)
 
             loss = g_loss + c_loss #+ bin_loss * 0.5
+            if self.args.bin_weight > 0:
+                loss += bin_loss * self.args.bin_weight
 
             self.gen_adv_opt.zero_grad()
             loss.backward(retain_graph=False)
@@ -196,6 +198,9 @@ class SubSpaceRelGANTrainer():
             bin_loss = self.dis_criterion(kbins_real, kbins)
 
             loss = d_loss #+ bin_loss * 0.5
+            if self.args.bin_weight > 0:
+                loss += bin_loss * self.args.bin_weight
+
             self.dis_opt.zero_grad()
             loss.backward(retain_graph=False)
             torch.nn.utils.clip_grad_norm_(self.D.parameters(), cfg.clip_norm)
@@ -341,6 +346,8 @@ class SubSpaceRelGANTrainer():
 
         # update sample kbins and latent feature
         batch = next(self.data_iterator)
+        while len(batch['bins']) < 10: # resample if length is under 10
+            batch = next(self.data_iterator)
         z_bins, z_latents = batch['bins'], batch['latents']
         z_bins = F.one_hot(z_bins, self.k_bins).float()
 
@@ -351,14 +358,14 @@ class SubSpaceRelGANTrainer():
         # initialize misc stuff, tensorboard, save path etc
         from datetime import datetime
         cur_time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-        save_path = 'save/sub{}-{}'.format(self.args.name, cur_time)
+        save_path = 'save/sub_{}-{}'.format(self.args.name, cur_time)
         os.makedirs(save_path, exist_ok=True)
         copyfile('module/relgan_d.py', os.path.join(save_path, 'relgan_d.py'))
         copyfile('module/relgan_g.py', os.path.join(save_path, 'relgan_g.py'))
         self.save_path = save_path
         with open(os.path.join(save_path, 'params.json'), 'w') as f:
             json.dump(vars(self.args), f)
-        writer = SummaryWriter('logs/sub{}-{}'.format(self.args.name, cur_time))
+        writer = SummaryWriter('logs/sub_{}-{}'.format(self.args.name, cur_time))
         print('Pretrain stage....')
         if args.pretrain_gen is not None:
             gen_dict = torch.load(args.pretrain_gen)
@@ -502,7 +509,7 @@ if __name__ == "__main__":
                         default=True, help='Update latent assignment every epoch?')
 
     parser.add_argument('--gp-weight', type=float, default=10)
-
+    parser.add_argument('--bin-weight', type=float, default=0.5)
     parser.add_argument('--loss-type', type=str, default='rsgan', 
                         choices=['rsgan', 'wasstestein', 'hinge'])
 
