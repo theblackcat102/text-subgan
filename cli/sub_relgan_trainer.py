@@ -89,9 +89,19 @@ class SubSpaceRelGANTrainer():
 
                     inputs, target = inputs.cuda(), target.cuda()
                     kbins, latent = kbins.cuda(), latent.cuda()
-                    
+
+
+                    real_samples = F.one_hot(target, self.args.vocab_size).float()
+                    if cfg.CUDA:
+                        real_samples = real_samples.cuda()
+                    _, _, embed_real = self.D(real_samples)
+
+                    # Train cluster module
+                    _c_logits, _ = self.C(real_samples, embed_real.detach())
+                    c_logits = F.softmax(_c_logits, 1)
+
                     batch_size = inputs.shape[0]
-                    hidden = self.G.init_hidden(kbins, latent, batch_size=batch_size)
+                    hidden = self.G.init_hidden(c_logits, latent, batch_size=batch_size)
                     pred = self.G.forward(inputs, hidden, need_hidden=False)
                     self.gen_opt.zero_grad()
                     loss = self.mle_criterion(pred, target.flatten())
