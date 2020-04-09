@@ -51,7 +51,7 @@ class SubSpaceRelGANTrainer():
             max_seq_len=args.max_seq_len-1, padding_idx=Constants.PAD, gpu=True)
         self.D = RelSpaceGAN_D(args.dis_embed_dim, args.max_seq_len-1, args.num_rep, dataset.vocab_size, Constants.PAD,
             kbins=K_BINS, gpu=True, dropout=0.25)
-        self.C = Cluster(self.D.embeddings, args.dis_embed_dim, embed_dim=100, k_bins=K_BINS, output_embed_dim=100)
+        self.C = Cluster(self.G.embeddings, args.gen_embed_dim, embed_dim=100, k_bins=K_BINS, output_embed_dim=100)
         self.kmeans = KMeans(n_clusters=K_BINS, random_state=666)
         self.dataset.p = self.kmeans.fit_predict(self.dataset.latent)
         self.k_bins = K_BINS
@@ -94,7 +94,7 @@ class SubSpaceRelGANTrainer():
                     _, _, embed_real = self.D(real_samples)
 
                     # Train cluster module
-                    _c_logits, _ = self.C(real_samples, embed_real.detach())
+                    _c_logits, _ = self.C(target, embed_real.detach())
                     c_logits = F.softmax(_c_logits, 1)
 
                     batch_size = inputs.shape[0]
@@ -135,7 +135,7 @@ class SubSpaceRelGANTrainer():
             d_out_real, kbins_real, embed_real = self.D(real_samples)
 
             # Train cluster module
-            _c_logits, _ = self.C(real_samples, embed_real.detach())
+            _c_logits, _ = self.C(target, embed_real.detach())
             c_logits = F.softmax(_c_logits, 1)
             c_bins = torch.argmax(c_logits, 1).long()
 
@@ -147,7 +147,7 @@ class SubSpaceRelGANTrainer():
             _c_logits = F.log_softmax(_c_logits, dim=1)
             c_loss = self.KL_criterion(_c_logits, norm_kbins_)
 
-            loss = g_loss + self.args.c_weight*c_loss #+ bin_loss * 0.5
+            loss = self.args.g_weight*g_loss + self.args.c_weight*c_loss #+ bin_loss * 0.5
             if self.args.bin_weight > 0:
                 loss += bin_loss * self.args.bin_weight
 
@@ -182,7 +182,7 @@ class SubSpaceRelGANTrainer():
             batch_size = inputs.shape[0]
             real_samples = F.one_hot(target, self.args.vocab_size).float()
             d_out_real, kbins_real, embed_real = self.D(real_samples)
-            c_logits, _ = self.C(real_samples, embed_real)
+            c_logits, _ = self.C(target, embed_real)
             c_logits = F.softmax(c_logits, 1)
             c_bins = torch.argmax(c_logits, 1).long()
 
@@ -255,7 +255,7 @@ class SubSpaceRelGANTrainer():
                 real_samples = F.one_hot(target, self.args.vocab_size).float()
 
                 d_out_real, kbins_real, embed_real = self.D(real_samples)
-                c_logits, _ = self.C(real_samples, embed_real)
+                c_logits, _ = self.C(target, embed_real)
                 c_logits = F.softmax(c_logits, 1)
                 
                 results = self.G.sample(c_logits, latent, batch_size, batch_size)
@@ -302,7 +302,7 @@ class SubSpaceRelGANTrainer():
         # self.sample_results(None)
         
 
-    def update_latent(self):
+    def update_latent(self, writer=None, iter=0):
         # print('Updating latent feature')
         eval_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=8,
                         collate_fn=seq_collate, batch_size=64, shuffle=False)
@@ -318,7 +318,7 @@ class SubSpaceRelGANTrainer():
                 real_samples = F.one_hot(target, self.args.vocab_size).float()
                 _, _, embed_real = self.D(real_samples)
                 # Train cluster module
-                logits, embed = self.C(real_samples, embed_real)
+                logits, embed = self.C(target, embed_real)
                 latents.append(embed.cpu())
                 P.append(torch.argmax(logits, 1).cpu())
                 iter_ += 1
@@ -341,6 +341,9 @@ class SubSpaceRelGANTrainer():
         # update latent space
         self.dataset.latent = context
         self.dataset.p = self.kmeans.fit_predict(self.dataset.latent)
+        if writer != None:
+            writer.add_histogram('K_Bins', self.dataset.p, iter)
+            writer.add_histogram('Latent', self.dataset.latent, iter)
         # update P weights
         self.bins_weight = self.dataset.calculate_stats().cuda()
         self.D.train(), self.C.train()
@@ -373,6 +376,10 @@ class SubSpaceRelGANTrainer():
             self.G.load_state_dict(gen_dict)
         else:
             self.pretrain_generator(args.pretrain_epochs, writer=writer)
+
+        if self.args.gen_embed_dim == self.args.dis_embed_dim:
+            self.D.embeddings.weight.data.copy_(self.G.embeddings.weight.data.T)
+
         # fix our latent feature for sampling
         batch = next(self.data_iterator)
         z_bins, z_latents = batch['bins'], batch['latents']
@@ -381,6 +388,9 @@ class SubSpaceRelGANTrainer():
         self.z_bins, self.z_latents = z_bins.cuda(), z_latents.cuda()
         resample_freq = len(self.dataset) // self.args.batch_size
         print(resample_freq)
+        if writer != None:
+            writer.add_histogram('K_Bins', self.dataset.p, 0)
+            writer.add_histogram('Latent', self.dataset.latent, 0)
 
         # start training...
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
@@ -447,13 +457,13 @@ class SubSpaceRelGANTrainer():
                 
                 if i % resample_freq == 0 and i > 0 and self.args.update_latent:
                     resample_freq = len(self.dataset) // self.args.batch_size
-                    self.update_latent()
+                    self.update_latent(writer, i)
 
         writer.flush()
 
     def update_temp(self, i, N):
         # temperature = np.maximum( np.exp(-self.args.anneal_rate * i), self.args.temperature_min)
-        self.G.temperature = get_fixed_temperature(cfg.temperature, i, N, cfg.temp_adpt)
+        self.G.temperature = get_fixed_temperature(self.args.temperature, i, N, cfg.temp_adpt)
 
     @staticmethod
     def optimize(opt, loss, model=None, retain_graph=False):
@@ -497,11 +507,13 @@ if __name__ == "__main__":
     parser.add_argument('--num-rep', type=int, default=64)
 
     parser.add_argument('--temperature-min', type=float, default=0.1)
+    parser.add_argument('--temperature', type=float, default=cfg.temperature)
+
     parser.add_argument('--anneal-rate', type=float, default=0.00002)
 
     parser.add_argument('--gen-lr', type=float, default=0.0001)
     parser.add_argument('--gen-adv-lr', type=float, default=0.0001)
-    parser.add_argument('--dis-lr', type=float, default=0.0004)
+    parser.add_argument('--dis-lr', type=float, default=0.001)
     parser.add_argument('--grad-penalty', type=str2bool, nargs='?',
                         default=False, help='Apply gradient penalty')
     parser.add_argument('--full-text', type=str2bool, nargs='?',
@@ -510,6 +522,7 @@ if __name__ == "__main__":
                         default=True, help='Update latent assignment every epoch?')
 
     parser.add_argument('--c-weight', type=float, default=1)
+    parser.add_argument('--g-weight', type=float, default=1)
     parser.add_argument('--gp-weight', type=float, default=10)
     parser.add_argument('--bin-weight', type=float, default=0.5)
     parser.add_argument('--loss-type', type=str, default='rsgan', 

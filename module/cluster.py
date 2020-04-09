@@ -19,7 +19,6 @@ class Cluster(nn.Module):
             ResBlock(embedding_dim),
             ResBlock(embedding_dim),
             ResBlock(embedding_dim),
-            ResBlock(embedding_dim),
         )
         self.maxpool = nn.AdaptiveMaxPool1d(1)
         self.linear = nn.Linear(embedding_dim+embed_dim, 256)
