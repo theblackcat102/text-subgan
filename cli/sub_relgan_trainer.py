@@ -12,7 +12,7 @@ from module.relgan_g import RelSpaceG
 from dataset import TextSubspaceDataset, seq_collate
 from constant import Constants
 from utils import get_fixed_temperature, get_losses
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, MiniBatchKMeans
 import sklearn
 import numpy as np
 from tensorboardX import SummaryWriter
@@ -142,7 +142,7 @@ class SubSpaceRelGANTrainer():
             _c_logits = F.log_softmax(_c_logits, dim=1)
             c_loss = self.KL_criterion(_c_logits, norm_kbins_)
 
-            loss = g_loss + c_loss #+ bin_loss * 0.5
+            loss = g_loss + self.args.c_weight*c_loss #+ bin_loss * 0.5
             if self.args.bin_weight > 0:
                 loss += bin_loss * self.args.bin_weight
 
@@ -195,7 +195,7 @@ class SubSpaceRelGANTrainer():
                 d_gp_loss = gradient_penalty(self.D, real_samples, gen_samples.detach())
                 d_loss += self.args.gp_weight*d_gp_loss
 
-            bin_loss = self.dis_criterion(kbins_real, kbins)
+            bin_loss = self.dis_criterion(kbins_real, c_bins)
 
             loss = d_loss #+ bin_loss * 0.5
             if self.args.bin_weight > 0:
@@ -508,6 +508,7 @@ if __name__ == "__main__":
     parser.add_argument('--update-latent', type=str2bool, nargs='?',
                         default=True, help='Update latent assignment every epoch?')
 
+    parser.add_argument('--c-weight', type=float, default=1)
     parser.add_argument('--gp-weight', type=float, default=10)
     parser.add_argument('--bin-weight', type=float, default=0.5)
     parser.add_argument('--loss-type', type=str, default='rsgan', 

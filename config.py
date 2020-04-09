@@ -123,7 +123,7 @@ else:
     device = -1
 # device=1
 # print('device: ', device)
-torch.cuda.set_device(device)
+# torch.cuda.set_device(device)
 
 # ===Save Model and samples===
 save_root = 'save/{}/{}/{}_{}_lt-{}_sl{}_temp{}_T{}/'.format(time.strftime("%Y%m%d"),
