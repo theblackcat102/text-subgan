@@ -86,14 +86,11 @@ class SubSpaceRelGANTrainer():
                     inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
                     kbins, latent = batch['bins'], batch['latents']
                     kbins = F.one_hot(kbins, self.k_bins).float()
-
-                    inputs, target = inputs.cuda(), target.cuda()
-                    kbins, latent = kbins.cuda(), latent.cuda()
-
+                    if cfg.CUDA:
+                        inputs, target = inputs.cuda(), target.cuda()
+                        kbins, latent = kbins.cuda(), latent.cuda()
 
                     real_samples = F.one_hot(target, self.args.vocab_size).float()
-                    if cfg.CUDA:
-                        real_samples = real_samples.cuda()
                     _, _, embed_real = self.D(real_samples)
 
                     # Train cluster module
@@ -133,8 +130,6 @@ class SubSpaceRelGANTrainer():
 
             batch_size = inputs.shape[0]
             real_samples = F.one_hot(target, self.args.vocab_size).float()
-            if cfg.CUDA:
-                real_samples = real_samples.cuda()
             norm_kbins_ = F.softmax(kbins_ / self.bins_weight.expand(batch_size, self.k_bins), dim=1)
 
             d_out_real, kbins_real, embed_real = self.D(real_samples)
@@ -186,8 +181,6 @@ class SubSpaceRelGANTrainer():
 
             batch_size = inputs.shape[0]
             real_samples = F.one_hot(target, self.args.vocab_size).float()
-            if cfg.CUDA:
-                real_samples = real_samples.cuda()
             d_out_real, kbins_real, embed_real = self.D(real_samples)
             c_logits, _ = self.C(real_samples, embed_real)
             c_logits = F.softmax(c_logits, 1)
@@ -256,11 +249,10 @@ class SubSpaceRelGANTrainer():
                 batch_size = inputs.shape[0]
                 kbins, latent = batch['bins'], batch['latents']
                 kbins = F.one_hot(kbins, self.k_bins).float()
-                target = target.cuda()
+                if cfg.CUDA:
+                    target = target.cuda()
                 kbins, latent = kbins.cuda(), latent.cuda()
                 real_samples = F.one_hot(target, self.args.vocab_size).float()
-                if cfg.CUDA:
-                    real_samples = real_samples.cuda()
 
                 d_out_real, kbins_real, embed_real = self.D(real_samples)
                 c_logits, _ = self.C(real_samples, embed_real)
@@ -321,10 +313,9 @@ class SubSpaceRelGANTrainer():
             for batch in eval_dataloader:
                 inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
                 kbins, latent = batch['bins'], batch['latents']
-                target = target.cuda()
-                real_samples = F.one_hot(target, self.args.vocab_size).float()
                 if cfg.CUDA:
-                    real_samples = real_samples.cuda()
+                    target = target.cuda()
+                real_samples = F.one_hot(target, self.args.vocab_size).float()
                 _, _, embed_real = self.D(real_samples)
                 # Train cluster module
                 logits, embed = self.C(real_samples, embed_real)
