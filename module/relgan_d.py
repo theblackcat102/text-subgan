@@ -77,7 +77,10 @@ class RelSpaceGAN_D(CNNDiscriminator):
         self.embeddings = nn.Linear(vocab_size, embed_dim, bias=False)
 
         self.convs = nn.ModuleList([
-            nn.Conv2d(1, n, (f, self.emb_dim_single), stride=(1, self.emb_dim_single)) for (n, f) in
+            nn.Sequential(
+                nn.Conv2d(1, n, (f, self.emb_dim_single), stride=(1, self.emb_dim_single)),
+                # nn.BatchNorm2d(n),
+             ) for (n, f) in
             zip(dis_num_filters, dis_filter_sizes)
         ])
 
