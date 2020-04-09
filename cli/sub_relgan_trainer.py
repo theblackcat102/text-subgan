@@ -66,7 +66,7 @@ class SubSpaceRelGANTrainer():
         self.gen_opt  = optim.Adam(self.G.parameters(), lr=args.gen_lr)
 
         self.gen_adv_opt  = optim.Adam(list(self.G.parameters()) + list(self.C.parameters()), lr=args.gen_adv_lr, betas=(0.5, 0.999))
-        self.dis_opt  = optim.Adam(self.D.parameters(), lr=args.dis_lr, betas=(0.5, 0.999))
+        self.dis_opt  = optim.Adam(self.D.parameters(), lr=args.dis_lr, betas=(0.5, 0.999), weight_decay=1e-7)
 
         self.mle_criterion = nn.NLLLoss(ignore_index=Constants.PAD)
         self.KL_criterion = nn.KLDivLoss(reduction='batchmean')
