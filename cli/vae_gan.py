@@ -5,10 +5,12 @@ import torch.optim as optim
 from tqdm import tqdm
 import os, glob, json
 import config as cfg
-
-from module.relgan_d import RelSpaceGAN_D
-from module.cluster import Cluster
-from module.relgan_g import RelSpaceG
+from module.vae import VariationalAutoEncoder, GaussianKLLoss
+from module.seq2seq import CycleLoss
+from module.generator import VAE_Generator
+from module.discriminator import VAE_Discriminator
+from module.cluster import VAE_Cluster
+# from module.relgan_g import RelSpaceG
 from dataset import TextSubspaceDataset, seq_collate
 from constant import Constants
 from utils import get_fixed_temperature, get_losses
@@ -23,11 +25,9 @@ from nltk.translate.bleu_score import SmoothingFunction
 from shutil import copyfile
 
 
-
 K_BINS = 20
 
-class SubSpaceRelGANTrainer():
-
+class VAE_GAN_Trainer():
 
     def __init__(self, args):
         self.dataset = TextSubspaceDataset(-1, 'data/kkday_dataset/train_title.txt', prefix='train_title', embedding=None, 
@@ -35,44 +35,70 @@ class SubSpaceRelGANTrainer():
         dataset = self.dataset
         self.dataloader = data_iter(torch.utils.data.DataLoader(self.dataset, num_workers=4,
                         collate_fn=seq_collate, batch_size=args.batch_size, shuffle=True))
-
-        self.pretrain_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=4,
-                        collate_fn=seq_collate, batch_size=args.batch_size, shuffle=True)
-        args.kbins = K_BINS
-        self.G = RelSpaceG(args.mem_slots, args.num_heads, args.head_size, args.gen_embed_dim, 
-            args.gen_hidden_dim, dataset.vocab_size,
-            k_bins=K_BINS, latent_dim=args.gen_latent_dim, noise_dim=args.gen_noise_dim,
-            max_seq_len=args.max_seq_len-1, padding_idx=Constants.PAD, gpu=True)
-        self.D = RelSpaceGAN_D(args.dis_embed_dim, args.max_seq_len-1, args.num_rep, dataset.vocab_size, Constants.PAD,
-            kbins=K_BINS, gpu=True, dropout=0.25)
-        self.C = Cluster(self.G.embeddings, args.gen_embed_dim, embed_dim=100, k_bins=K_BINS, output_embed_dim=100)
-        self.kmeans = KMeans(n_clusters=K_BINS, random_state=666)
-        self.dataset.p = self.kmeans.fit_predict(self.dataset.latent)
         self.k_bins = K_BINS
-        self.C.cuda()
+
+        self.G = VAE_Generator(args.gen_noise_dim, K_BINS, args.gen_latent_dim, 
+            args.gen_num_layers, args.block_dim)
+        self.D = VAE_Discriminator(k_bins=K_BINS, block_dim=args.block_dim, n_layers=args.dis_num_layers)
+        self.C = VAE_Cluster( args.block_dim, embed_dim=args.block_dim, k_bins=K_BINS, output_embed_dim=K_BINS)
+        self.V = VariationalAutoEncoder(dataset.vocab_size, 
+            dec_hidden_size=args.block_dim, bin_latent_dim=K_BINS, k_bins=K_BINS,
+            max_seq_len=args.max_seq_len, noise_dim=args.gen_noise_dim)
+
         self.G.cuda()
+        self.V.cuda()
+        self.C.cuda()
         self.D.cuda()
+
+        self.gen_opt = optim.Adam(self.V.parameters(), lr=args.vae_lr)
+        self.gen_adv_opt  = optim.Adam(list(self.G.parameters()) + list(self.C.parameters())
+            , lr=args.gen_adv_lr, betas=(0.5, 0.999))
+        self.dis_opt  = optim.Adam(self.D.parameters(), lr=args.dis_lr, betas=(0.5, 0.999), weight_decay=1e-7)
+
+        self.bins_weight = self.dataset.calculate_stats().cuda()        
 
         args.vocab_size = dataset.vocab_size
         self.args = args
-
-        # self.cluster_opt = optim.Adam(self.C.parameters(), lr=args.dis_lr)
-        self.gen_opt  = optim.Adam(self.G.parameters(), lr=args.gen_lr)
-
-        self.gen_adv_opt  = optim.Adam(list(self.G.parameters()) + list(self.C.parameters()), lr=args.gen_adv_lr, betas=(0.5, 0.999))
-        self.dis_opt  = optim.Adam(self.D.parameters(), lr=args.dis_lr, betas=(0.5, 0.999), weight_decay=1e-7)
-
-        self.mle_criterion = nn.NLLLoss(ignore_index=Constants.PAD)
+        self.data_iterator = data_iter(self.dataloader)
+        batch = next(self.data_iterator)
+        while len(batch['bins']) < 10: # resample if length is under 10
+            batch = next(self.data_iterator)
+        z_bins, z_latents = batch['bins'], batch['latents']
+        z_bins = F.one_hot(z_bins, self.k_bins).float()
+        # fix latent feature
+        self.z_bins, self.z_latents = z_bins.cuda(), z_latents.cuda()
+        self.criteria = nn.BCEWithLogitsLoss()
         self.KL_criterion = nn.KLDivLoss(reduction='batchmean')
         self.dis_criterion = nn.CrossEntropyLoss()
-
-        self.data_iterator = data_iter(self.dataloader)
-
         self.bins_weight = self.dataset.calculate_stats().cuda()
+        self.kmeans = KMeans(n_clusters=K_BINS, random_state=666)
+        self.dataset.p = self.kmeans.fit_predict(self.dataset.latent)
 
 
-    def pretrain_generator(self, epochs, writer=None):
+    def sample_results(self, writer, step=0):
+        latent = self.G.sample(self.z_bins[:10, :], self.z_latents[:10, :], 10)
+        results = self.V.sample_text(latent)
+        samples = ''
+        for idx, sent in enumerate(results):
+            sentence = []
+            for token in sent:
+                if token.item() == Constants.EOS:
+                    break
+                sentence.append(  self.dataset.idx2word[token.item()])
+            samples += str(idx) + '. ' +' '.join(sentence) + '\n\n'
+        # print(samples)
+        if writer != None:
+            writer.add_text("Text", samples, step)
+            writer.flush()
+
+    def pretrain_vae(self, epochs, writer=None):
         iter_ = 0
+        self.pretrain_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=4,
+                collate_fn=seq_collate, batch_size=self.args.batch_size, shuffle=True)
+
+        criterion_KL = GaussianKLLoss()
+        criterion_cycle = CycleLoss()
+
         for epoch in range(epochs):
             print('Epoch '+ str(epoch))
             with tqdm(total=len(self.pretrain_dataloader), dynamic_ncols=True) as pbar:
@@ -84,147 +110,143 @@ class SubSpaceRelGANTrainer():
                         inputs, target = inputs.cuda(), target.cuda()
                         kbins, latent = kbins.cuda(), latent.cuda()
 
-                    real_samples = F.one_hot(target, self.args.vocab_size).float()
-                    _, _, embed_real = self.D(real_samples)
-
-                    # Train cluster module
-                    _c_logits, _ = self.C(target, embed_real.detach())
-                    c_logits = F.softmax(_c_logits, 1)
-                    batch_size = inputs.shape[0]
-                    hidden = self.G.init_hidden(c_logits, latent, batch_size=batch_size)
-                    pred = self.G.forward(inputs, hidden, need_hidden=False)
+                    outputs, latent, mean, std, de_outputs = self.V(kbins, latent, inputs, 
+                        device='cuda', max_length=target.shape[1])
                     self.gen_opt.zero_grad()
-                    loss = self.mle_criterion(pred, target.flatten())
+
+                    loss_NLL = criterion_cycle(de_outputs, target)
+                    loss_KL = criterion_KL(mean, std)
+                    loss = loss_NLL + loss_KL
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.G.parameters(), cfg.clip_norm)
+                    torch.nn.utils.clip_grad_norm_(self.V.parameters(), cfg.clip_norm)
                     self.gen_opt.step()
                     iter_ += 1
                     pbar.update(1)
                     pbar.set_description('loss: {:.4f}'.format(loss.item()))
+
                     if iter_ % cfg.pre_log_step == 0 and writer is not None:
                         writer.add_scalar('pretrain/loss', loss.item(), iter_)
+                        writer.add_scalar('pretrain/kl_loss', loss_KL.item(), iter_)
+                        writer.add_scalar('pretrain/nll_loss', loss_NLL.item(), iter_)
 
-            torch.save(self.G.state_dict(), 'save/subspace_relgan_G_pretrained_{}_{}.pt'.format(self.k_bins, self.args.tokenize))
+                    # print(loss.item(), loss_NLL.item(), loss_KL.item())
+
+            torch.save(self.V.state_dict(), 'save/vae_{}_{}.pt'.format(self.k_bins, self.args.tokenize))
 
     def adv_train_generator(self, g_step=1):
-        total_loss = 0
-        total_g_loss, total_bin_loss, total_c_loss = 0, 0, 0
+        total_loss, total_g_loss, total_bin_loss, total_c_loss = 0, 0, 0, 0
         g_step = min(g_step, 1)
 
         for step in range(g_step):
             batch = next(self.data_iterator)
             inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
+            batch_size = inputs.shape[0]
+
             kbins, latent = batch['bins'], batch['latents']
             kbins_ = F.one_hot(kbins, self.k_bins).float()
+            real_label = torch.full((batch_size, 1), 1)
+
             if cfg.CUDA:
                 kbins_, latent = kbins_.cuda(), latent.cuda()
                 kbins = kbins.cuda()
                 target = target.cuda()
+                real_label = real_label.cuda()
 
-            batch_size = inputs.shape[0]
-            real_samples = F.one_hot(target, self.args.vocab_size).float()
             norm_kbins_ = F.softmax(kbins_ / self.bins_weight.expand(batch_size, self.k_bins), dim=1)
+            self.gen_adv_opt.zero_grad()
+            
+            fake_latent = self.G.sample(kbins_, latent, batch_size)
+            real_latent = self.V.encode(kbins_, latent, target, 'cuda')
 
-            d_out_real, kbins_real, embed_real = self.D(real_samples)
 
-            # Train cluster module
-            _c_logits, _ = self.C(target, embed_real.detach())
-            c_logits = F.softmax(_c_logits, 1)
-            c_bins = torch.argmax(c_logits, 1).long()
+            d_out_fake, kbins_fake, embed_fake = self.D(fake_latent)
+            _, kbins_real, embed_real = self.D(real_latent)
 
-            gen_samples = self.G.sample(c_logits.detach(), latent, batch_size, batch_size, one_hot=True)
-            # backprop discriminator gradient back to generator via gumbel softmax
-            d_out_fake, kbins_fake, embed_fake = self.D(gen_samples)
-            g_loss, _ = get_losses(d_out_real, d_out_fake, self.args.loss_type)
+            _c_logits, _ = self.C(real_latent, embed_real.detach())
 
-            bin_loss = self.dis_criterion(kbins_fake, c_bins)
+            # which source should we use for kbins ?
+            c_bins = torch.argmax(norm_kbins_.detach(), 1).long()
+
             _c_logits = F.log_softmax(_c_logits, dim=1)
+
             c_loss = self.KL_criterion(_c_logits, norm_kbins_)
 
-            loss = self.args.g_weight*g_loss + self.args.c_weight*c_loss #+ bin_loss * 0.5
+            g_loss = self.criteria(d_out_fake, real_label)
+
+            bin_loss = self.dis_criterion(kbins_fake, c_bins)
+
+            loss = self.args.g_weight*g_loss + self.args.c_weight*c_loss
             if self.args.bin_weight > 0:
                 loss += bin_loss * self.args.bin_weight
 
-            self.gen_adv_opt.zero_grad()
-            loss.backward(retain_graph=False)
-            torch.nn.utils.clip_grad_norm_(self.G.parameters(), cfg.clip_norm)
+            loss.backward()
+
             self.gen_adv_opt.step()
 
-            total_g_loss += g_loss.item()
-            total_bin_loss += bin_loss.item()
+
             total_loss += loss.item()
+            total_g_loss += g_loss.item()
             total_c_loss += c_loss.item()
+            total_bin_loss += bin_loss.item()
 
         return total_loss / g_step, total_g_loss / g_step, total_bin_loss / g_step, total_c_loss / g_step
 
     def adv_train_discriminator(self, d_step=1):
-        total_loss = 0
-        total_bin_loss, total_d_loss = 0, 0
+        total_loss, total_bin_loss, total_d_loss = 0, 0, 0
         d_step = min(d_step, 1)
         for step in range(d_step):
             batch = next(self.data_iterator)
             inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
+            batch_size = inputs.shape[0]
+            real_label = torch.full((batch_size, 1), 1)
+            fake_label = torch.full((batch_size, 1), 0)
+
             kbins, latent = batch['bins'], batch['latents']
-            # kbins_ = F.one_hot(kbins, self.k_bins).float()
-            # norm_kbins_ = F.softmax(kbins_ / self.bins_weight.expand(batch_size, self.k_bins), dim=1)
+            kbins_ = F.one_hot(kbins, self.k_bins).float()
             if cfg.CUDA:
-                # kbins_ = kbins_.cuda()
+                kbins_ = kbins_.cuda()
+                real_label, fake_label = real_label.cuda(), fake_label.cuda()
                 latent = latent.cuda()
                 kbins = kbins.cuda()
                 target = target.cuda()
 
-            batch_size = inputs.shape[0]
-            real_samples = F.one_hot(target, self.args.vocab_size).float()
-            d_out_real, kbins_real, embed_real = self.D(real_samples)
-            c_logits, _ = self.C(target, embed_real)
-            c_logits = F.softmax(c_logits, 1)
-            c_bins = torch.argmax(c_logits, 1).long()
+            norm_kbins_ = F.softmax(kbins_ / self.bins_weight.expand(batch_size, self.k_bins), dim=1)
 
             with torch.no_grad():
-                gen_samples = self.G.sample(c_logits, latent, batch_size, batch_size, one_hot=True)
+                fake_latent = self.G.sample(kbins_, latent, batch_size)
+                real_latent = self.V.encode(kbins_, latent, target, 'cuda')
 
+            self.dis_opt.zero_grad()
 
-            # ===Train===
-            d_out_fake, kbins_fake, embed_fake = self.D(gen_samples.detach())
-            _, d_loss = get_losses(d_out_real, d_out_fake, self.args.loss_type)
+            d_out_fake, kbins_fake, embed_fake = self.D(fake_latent)
+            d_out_real, kbins_real, embed_real = self.D(real_latent)
+
+            real_loss = self.criteria(d_out_real, real_label)
+            fake_loss = self.criteria(d_out_fake, fake_label)
+            d_loss = fake_loss+real_loss
 
             if self.args.grad_penalty:
                 d_gp_loss = gradient_penalty(self.D, real_samples, gen_samples.detach())
                 d_loss += self.args.gp_weight*d_gp_loss
+            loss = d_loss
 
-            bin_loss = self.dis_criterion(kbins_real, c_bins)
-
-            loss = d_loss #+ bin_loss * 0.5
+            bin_loss = 0
             if self.args.bin_weight > 0:
+                c_bins = torch.argmax(norm_kbins_, dim=1).detach()
+                bin_loss = self.dis_criterion(kbins_real, c_bins)
                 loss += bin_loss * self.args.bin_weight
 
-            self.dis_opt.zero_grad()
-            loss.backward(retain_graph=False)
-            torch.nn.utils.clip_grad_norm_(self.D.parameters(), cfg.clip_norm)
-            self.dis_opt.step()
+            loss.backward()
 
-            total_loss += loss.item()
-            total_bin_loss += bin_loss.item()
+            self.dis_opt.step()
+            
             total_d_loss += d_loss.item()
+            total_bin_loss += float(bin_loss)
+            total_loss += loss.item()
 
         return total_loss / d_step, total_d_loss / d_step, total_bin_loss / d_step
 
-    def sample_results(self, writer, step=0):
-        results = self.G.sample(self.z_bins[:10, :], self.z_latents[:10, :], 10, 10)
-        samples = ''
-        for idx, sent in enumerate(results):
-            sentence = []
-            for token in sent:
-                if token.item() == Constants.EOS:
-                    break
-                sentence.append(  self.dataset.idx2word[token.item()])
-            samples += str(idx) + '. :' +' '.join(sentence) + '\n\n'
-        # print(samples)
-        if writer != None:
-            writer.add_text("Text", samples, step)
-            writer.flush()
-
-    def calculate_bleu(self, writer, step=0, size=5000, ngram=4):
+    def calculate_bleu(self,writer, step=0, size=5000, ngram=4):
         '''
             writer: tensorboardX writer
             step: which iteration step
@@ -235,7 +257,6 @@ class SubSpaceRelGANTrainer():
         sentences, references = [], []
         scores_weights = { str(gram): [1/gram] * gram for gram in range(1, ngram+1)  }
         scores = { str(gram): 0 for gram in range(1, ngram+1)  }
-
         # print('Evaluate bleu scores', scores)
         with torch.no_grad():
             for batch in eval_dataloader:
@@ -244,17 +265,13 @@ class SubSpaceRelGANTrainer():
                 kbins, latent = batch['bins'], batch['latents']
                 kbins = F.one_hot(kbins, self.k_bins).float()
                 if cfg.CUDA:
-                    target = target.cuda()
-                kbins, latent = kbins.cuda(), latent.cuda()
-                real_samples = F.one_hot(target, self.args.vocab_size).float()
+                    kbins, latent = kbins.cuda(), latent.cuda()
 
-                d_out_real, kbins_real, embed_real = self.D(real_samples)
-                c_logits, _ = self.C(target, embed_real)
-                c_logits = F.softmax(c_logits, 1)
-                
-                results = self.G.sample(c_logits, latent, batch_size, batch_size)
+                norm_kbins_ = F.softmax(kbins / self.bins_weight.expand(batch_size, self.k_bins), dim=1)                
+                fake_latent = self.G.sample(norm_kbins_, latent, batch_size)
+                results = self.V.sample_text(fake_latent)
 
-                for idx, sent_token in enumerate(batch['seq'][:, 1:]):
+                for idx, sent_token in enumerate(target):
                     reference = []
                     for token in sent_token:
                         if token.item() == Constants.EOS:
@@ -275,7 +292,6 @@ class SubSpaceRelGANTrainer():
 
                 if len(sentences) > size:
                     break
-
         with open(os.path.join(self.save_path, '{}_reference.txt'.format(0)), 'w') as f:
             for sent in references:
                 f.write(' '.join(sent)+'\n')
@@ -290,13 +306,8 @@ class SubSpaceRelGANTrainer():
                 writer.add_scalar("Bleu/score-"+key, scores[key], step)
             writer.flush()
 
-    def _test(self):
-        print(">start test")
-        from time import time
-        # self.sample_results(None)
-        
-
     def update_latent(self, writer=None, iter=0):
+
         # print('Updating latent feature')
         eval_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=8,
                         collate_fn=seq_collate, batch_size=64, shuffle=False)
@@ -307,12 +318,15 @@ class SubSpaceRelGANTrainer():
             for batch in eval_dataloader:
                 inputs, target = batch['seq'][:, :-1], batch['seq'][:, 1:]
                 kbins, latent = batch['bins'], batch['latents']
+                kbins = F.one_hot(kbins, self.k_bins).float()
                 if cfg.CUDA:
-                    target = target.cuda()
-                real_samples = F.one_hot(target, self.args.vocab_size).float()
-                _, _, embed_real = self.D(real_samples)
+                    kbins, latent, target = kbins.cuda(), latent.cuda(), target.cuda()
+
+                real_latent = self.V.encode(kbins, latent, target, 'cuda')
+
+                _, _, embed_real = self.D(real_latent)
                 # Train cluster module
-                logits, embed = self.C(target, embed_real)
+                logits, embed = self.C(real_latent, embed_real)
                 latents.append(embed.cpu())
                 P.append(torch.argmax(logits, 1).cpu())
                 iter_ += 1
@@ -321,7 +335,7 @@ class SubSpaceRelGANTrainer():
         P = torch.cat(P).data.numpy()
 
         context = []
-        # print('Calculate eigen latent features')
+        print('Calculate eigen latent features')
         # 40000 use roughly 40G of memory so reduce this if your memory is lower than 64G
         for latents_ in chunks(latents, 40000):
             embeddings = SpectralEmbedding(n_components=self.k_bins, affinity='rbf').fit_transform(latents_)
@@ -352,8 +366,9 @@ class SubSpaceRelGANTrainer():
         # fix latent feature
         self.z_bins, self.z_latents = z_bins.cuda(), z_latents.cuda()
 
+
+
     def train(self):
-        # initialize misc stuff, tensorboard, save path etc
         from datetime import datetime
         cur_time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
         save_path = 'save/sub_{}-{}'.format(self.args.name, cur_time)
@@ -364,15 +379,13 @@ class SubSpaceRelGANTrainer():
         with open(os.path.join(save_path, 'params.json'), 'w') as f:
             json.dump(vars(self.args), f)
         writer = SummaryWriter('logs/sub_{}-{}'.format(self.args.name, cur_time))
+
         print('Pretrain stage....')
         if args.pretrain_gen is not None:
-            gen_dict = torch.load(args.pretrain_gen)
-            self.G.load_state_dict(gen_dict)
+            vae_dict = torch.load(args.pretrain_gen)
+            self.V.load_state_dict(vae_dict)
         else:
-            self.pretrain_generator(args.pretrain_epochs, writer=writer)
-
-        if self.args.gen_embed_dim == self.args.dis_embed_dim:
-            self.D.embeddings.weight.data.copy_(self.G.embeddings.weight.data.T)
+            self.pretrain_vae(args.pretrain_epochs, writer=writer)
 
         # fix our latent feature for sampling
         batch = next(self.data_iterator)
@@ -389,18 +402,15 @@ class SubSpaceRelGANTrainer():
         # start training...
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
-
-                # update generator
-                self.G.train()
-                g_t_loss, g_loss, g_bin_loss, c_loss = self.adv_train_generator(g_step=self.args.gen_steps)
-
                 # update discriminator
-                self.D.train()
                 d_t_loss, d_loss, d_bin_loss = self.adv_train_discriminator(d_step=self.args.dis_steps)
 
-                self.update_temp(i, args.iterations)
+                # update generator
+                g_t_loss, g_loss, g_bin_loss, c_loss = self.adv_train_generator(g_step=self.args.gen_steps)
+
+                # self.update_temp(i, args.iterations)
                 pbar.set_description(
-                    'g_loss: %.4f, d_loss: %.4f, temp: %.4f' % (g_loss, d_loss, self.G.temperature))
+                    'g_loss: %.4f, d_loss: %.4f' % (g_loss, d_loss))
 
                 if i % args.check_iter == 0:
                     torch.save({
@@ -424,59 +434,43 @@ class SubSpaceRelGANTrainer():
                     writer.add_scalar('G/loss', g_t_loss, i)
                     writer.add_scalar('G/g_loss', g_loss, i)
                     writer.add_scalar('G/bin_loss', g_bin_loss, i)
-                    writer.add_scalar('G/temp', self.G.temperature, i)
                     writer.add_scalar('G/c_loss', c_loss, i)
 
                     writer.add_scalar('D/loss', d_t_loss, i)
                     writer.add_scalar('D/d_loss', d_loss, i)
                     writer.add_scalar('D/bin_loss', d_bin_loss, i)
 
-
-                pbar.update(1)
                 if i % 100 == 0:
-                    curr_temp = self.G.temperature
-                    self.G.temperature = 1.0
                     self.G.eval()
                     self.sample_results(writer, i)
-                    self.G.temperature = curr_temp
                     self.G.train()
 
                 if i % self.args.bleu_iter == 0:
-                    curr_temp = self.G.temperature
-                    self.G.temperature = 1.0
                     self.G.eval(), self.D.eval(), self.C.eval()
                     self.calculate_bleu(writer, i)
-                    self.G.temperature = curr_temp
                     self.G.train(), self.D.train(), self.C.train()
-                
+
                 if i % resample_freq == 0 and i > 0 and self.args.update_latent:
                     resample_freq = len(self.dataset) // self.args.batch_size
                     self.update_latent(writer, i)
 
-        writer.flush()
-
-    def update_temp(self, i, N):
-        # temperature = np.maximum( np.exp(-self.args.anneal_rate * i), self.args.temperature_min)
-        self.G.temperature = get_fixed_temperature(self.args.temperature, i, N, cfg.temp_adpt)
-
-    @staticmethod
-    def optimize(opt, loss, model=None, retain_graph=False):
-        """Add clip_grad_norm_"""
-        opt.zero_grad()
-        loss.backward(retain_graph=retain_graph)
-        if model is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_norm)
-        opt.step()
+                pbar.update(1)
 
 
+    def _test(self):
+        print(">start test")
+        from time import time
+
+        # latent = self.G.sample(self.z_bins[:10, :], self.z_latents[:10, :], 10, 10)
+        # samples = self.V.sample_text(latent)
+        # logits, k_bins, latent = self.D(latent)
+        # self.sample_results(None)
+        self.pretrain_vae(100)
 
 if __name__ == "__main__":
     import argparse
-    # args.mem_slots, args.num_heads, args.head_size, args.gen_embed_dim, args.gen_hidden_dim
-    # args.dis_embed_dim, args.max_seq_len, args.num_rep
-    # args.gen_lr args.gen_adv_lr, args.dis_lr
     parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument('--batch-size', type=int, default=32)
+    parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--clip-norm', type=float, default=1.0)
     parser.add_argument('--pretrain-epochs', type=int, default=100)
     parser.add_argument('--iterations', type=int, default=10000)
@@ -486,28 +480,23 @@ if __name__ == "__main__":
     parser.add_argument('--gen-steps', type=int, default=1)
     parser.add_argument('--dis-steps', type=int, default=1)
     parser.add_argument('--tokenize', '-t', type=str, default='word', choices=['word', 'char'])
+    parser.add_argument('--max-seq-len', type=int, default=56)
 
-    parser.add_argument('--name', type=str, default='relgan')
-
-    parser.add_argument('--head-size', type=int, default=256)
-    parser.add_argument('--mem-slots', type=int, default=1)
-    parser.add_argument('--num-heads', type=int, default=2)
+    parser.add_argument('--name', type=str, default='vae-gan')
     parser.add_argument('--gen-noise-dim', type=int, default=100)
     parser.add_argument('--gen-latent-dim', type=int, default=K_BINS)
-    parser.add_argument('--gen-embed-dim', type=int, default=64)
-    parser.add_argument('--gen-hidden-dim', type=int, default=128)
-    parser.add_argument('--dis-embed-dim', type=int, default=64)
-    parser.add_argument('--max-seq-len', type=int, default=128)
-    parser.add_argument('--num-rep', type=int, default=64)
+    parser.add_argument('--block-dim', type=int, default=600)
+    parser.add_argument('--gen-num-layers', type=int, default=5)
+    parser.add_argument('--dis-num-layers', type=int, default=5)
 
     parser.add_argument('--temperature-min', type=float, default=0.1)
     parser.add_argument('--temperature', type=float, default=cfg.temperature)
 
     parser.add_argument('--anneal-rate', type=float, default=0.00002)
 
-    parser.add_argument('--gen-lr', type=float, default=0.0001)
+    parser.add_argument('--vae-lr', type=float, default=0.00001)
     parser.add_argument('--gen-adv-lr', type=float, default=0.0001)
-    parser.add_argument('--dis-lr', type=float, default=0.001)
+    parser.add_argument('--dis-lr', type=float, default=0.0004)
     parser.add_argument('--grad-penalty', type=str2bool, nargs='?',
                         default=False, help='Apply gradient penalty')
     parser.add_argument('--full-text', type=str2bool, nargs='?',
@@ -523,8 +512,12 @@ if __name__ == "__main__":
                         choices=['rsgan', 'wasstestein', 'hinge'])
 
     args = parser.parse_args()
-    trainer = SubSpaceRelGANTrainer(args)
+    trainer = VAE_GAN_Trainer(args)
+    trainer.train()
+    # trainer.calculate_bleu(None)
     # trainer.update_latent()
     # trainer.pretrain_generator(args.pretrain_epochs)
-    trainer.train()
+    # trainer.adv_train_generator(1)
+    # trainer.adv_train_discriminator(1)
+
     # trainer._test()

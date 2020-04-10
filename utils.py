@@ -9,6 +9,14 @@ from preprocess import clean_text, segment_text, pad_sequence
 from constant import Constants, CACHE_DIR, WRITER_PATTERN
 
 
+def data_iter(dataloader):
+    def function():
+        while True:
+            for batch in dataloader:
+                yield batch
+    return function()
+
+
 def str2bool(v):
     if isinstance(v, bool):
        return v

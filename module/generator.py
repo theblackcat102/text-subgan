@@ -106,3 +106,37 @@ class LSTMGenerator(nn.Module):
             return h.cuda(), c.cuda()
         else:
             return h, c
+
+from module.block import Block
+
+
+class VAE_Generator(nn.Module):
+    
+    def __init__(self, noise_dim=100, k_bins=20, latent_dim=100, n_layers=5, block_dim=600, gpu=True):
+        super().__init__()
+        self.block_dim = block_dim
+        self.input_dim = noise_dim + k_bins + latent_dim
+        self.noise_dim =  noise_dim
+        self.proj = None
+        self.gpu = gpu
+        if self.block_dim != self.input_dim:
+            self.proj = nn.Linear(self.input_dim, self.block_dim)
+
+        self.net = nn.Sequential(
+            *[Block(block_dim) for _ in range(n_layers)]
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+    def sample(self, kbins, latent, batch_size):
+        noise = torch.randn(batch_size, self.noise_dim)
+        if self.gpu:
+            noise = noise.cuda()
+        kbins = kbins
+        latents = torch.cat([noise, kbins, latent], axis=1)
+
+        if self.block_dim != self.input_dim:
+            latents = self.proj(latents)
+
+        return self.net(latents)

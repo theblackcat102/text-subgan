@@ -56,7 +56,7 @@ gen_lr = 0.01  # 0.01
 gen_adv_lr = 1e-4  # RelGAN-1e-4
 dis_lr = 1e-4  # SeqGAN,LeakGAN-1e-2, RelGAN-1e-4
 clas_lr = 1e-3
-clip_norm = 1.0
+clip_norm = 5.0
 
 pre_log_step = 10
 adv_log_step = 5

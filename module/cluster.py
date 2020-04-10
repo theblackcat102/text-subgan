@@ -48,6 +48,29 @@ class Cluster(nn.Module):
         return logits, embed
 
 
+class VAE_Cluster(nn.Module):
+
+    def __init__(self, block_dim, embed_dim=100, k_bins=5, output_embed_dim=100):
+        super(VAE_Cluster, self).__init__()
+        self.linear = nn.Sequential(
+            nn.Linear(block_dim+embed_dim, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, output_embed_dim),
+        )
+        self.relu = nn.ReLU()
+        self.logits = nn.Linear(output_embed_dim, k_bins)
+        
+    
+
+    def forward(self, text_latent, d_embedding):
+        latent = torch.cat([text_latent, d_embedding], axis=1)
+        embed = self.linear(latent)
+        embed = self.relu(embed)
+        logits = self.logits(embed)
+        return logits, embed
+
+
 if __name__ == "__main__":
     inputs = torch.randint(0, 3200, (32, 128)).long()
     latent = torch.rand((32, 100))

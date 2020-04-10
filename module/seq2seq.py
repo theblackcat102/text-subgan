@@ -4,7 +4,8 @@
 import torch
 import torch.nn as nn
 
-from transfer.utils import softmax, gumbel_softmax
+from utils import softmax, gumbel_softmax
+from constant import Constants
 
 
 class GaussianNoise(nn.Module):
@@ -184,7 +185,7 @@ class LuongAttention(nn.Module):
 class CycleLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self.criteria = nn.NLLLoss()
+        self.criteria = nn.NLLLoss(ignore_index=Constants.PAD)
 
     def forward(self, inputs, targets):
         """

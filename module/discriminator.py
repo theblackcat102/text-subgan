@@ -311,3 +311,25 @@ class CNNCritic(nn.Module):
         outputs = outputs.squeeze(-1)       # (B, H)
         outputs = self.linear(outputs)      # (B, 1)
         return outputs
+
+from module.block import Block
+
+
+class VAE_Discriminator(nn.Module):
+
+    def __init__(self, k_bins=20, n_layers=5, block_dim=600, gpu=True):
+        super().__init__()
+        self.block_dim = block_dim
+        self.gpu = gpu
+
+        self.net = nn.Sequential(
+            *[Block(block_dim) for _ in range(n_layers)]
+        )
+        self.k_bins = nn.Linear(block_dim, k_bins)
+        self.logits = nn.Linear(block_dim, 1)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        latent = self.net(x)
+        latent = self.relu(latent)
+        return self.logits(latent), self.k_bins(latent), latent
