@@ -59,3 +59,10 @@ Discriminator bin loss came from clusterer output
 subrelgan-bin-loss-0.5-kmeans-2020-04-07-06-00-03
 
 Discriminator bin loss came from label ( precalculated )
+
+
+
+
+```
+python -m cli.kkday_trainer --pretrain-embeddings ./data/kkday_dataset/model-128.bin --gen-embed-dim 128
+```

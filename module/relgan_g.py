@@ -12,8 +12,8 @@ import torch.nn.functional as F
 
 import config as cfg
 from module.generator import LSTMGenerator
+from module.seq2seq import Encoder, LuongAttention
 from module.relational_rnn_general import RelationalMemory
-
 
 class RelGAN_G(LSTMGenerator):
     def __init__(self, mem_slots, num_heads, head_size, embedding_dim, hidden_dim, vocab_size, max_seq_len, padding_idx,
@@ -190,14 +190,143 @@ class RelSpaceG(RelGAN_G):
         return samples
 
 
+class RelGAN_Seq2Seq(RelGAN_G):
+    def __init__( self, embedding_dim, hidden_dim, vocab_size, max_seq_len, padding_idx,
+            k_bins=5, latent_dim=100, noise_dim=100, enc_layers=2, enc_bidirect=True,
+            attention=None,
+            gpu=False):
+        super(RelGAN_Seq2Seq, self).__init__(-1, -1, -1, embedding_dim, hidden_dim, vocab_size, max_seq_len, padding_idx,
+            gpu, 'LSTM')
+        self.encoder = Encoder( embedding_dim, hidden_dim,  num_layers=enc_layers, dropout=0.1, 
+            bidirectional=enc_bidirect, cell=nn.LSTM )
+        self.attention = LuongAttention(hidden_dim, hidden_dim)
+
+        if attention is not None:
+            self.lstm2out = nn.Linear(hidden_dim * 2, self.vocab_size)
+        else:
+            self.lstm2out = nn.Linear(hidden_dim, self.vocab_size)
+
+
+
+    def init_hidden(self, input_seq, batch_size=cfg.batch_size):
+        inputs = self.embeddings(input_seq)
+        outputs, hidden = self.encoder(inputs)
+        hidden = hidden.unsqueeze(0).repeat(2, 1, 1)
+        h, c = hidden[[0], :, :], hidden[[1], :, :]
+        return outputs, (h, c)
+
+    def forward(self, inp, hidden, encoder_outputs=None, need_hidden=False):
+        """
+        Embeds input and applies LSTM
+        :param inp: batch_size * seq_len
+        :param hidden: (h, c)
+        :param need_hidden: if return hidden, use for sampling
+        """
+
+        emb = self.embeddings(inp)  # batch_size * len * embedding_dim
+        if len(inp.size()) == 1:
+            emb = emb.unsqueeze(1)  # batch_size * 1 * embedding_dim
+
+        out, hidden = self.lstm(emb, hidden)  # out: batch_size * seq_len * hidden_dim
+        if self.attention is not None:
+            out, attn_weight = self.attention(out, encoder_outputs)
+            out = out.contiguous().view(-1, self.hidden_dim*2)  # out: (batch_size * len) * hidden_dim
+        else:
+            out = out.contiguous().view(-1, self.hidden_dim)  # out: (batch_size * len) * hidden_dim
+
+        out = self.lstm2out(out)  # (batch_size * seq_len) * vocab_size
+        # out = self.temperature * out  # temperature
+        pred = self.softmax(out)
+
+        if need_hidden:
+            return pred, hidden
+        else:
+            return pred        
+
+    def step(self, inp, hidden, encoder_outputs=None):
+        """
+        RelGAN step forward
+        :param inp: [batch_size]
+        :param hidden: memory size
+        :return: pred, hidden, next_token, next_token_onehot, next_o
+            - pred: batch_size * vocab_size, use for adversarial training backward
+            - hidden: next hidden
+            - next_token: [batch_size], next sentence token
+            - next_token_onehot: batch_size * vocab_size, not used yet
+            - next_o: batch_size * vocab_size, not used yet
+        """
+        emb = self.embeddings(inp).unsqueeze(1)
+        out, hidden = self.lstm(emb, hidden)
+
+        if self.attention is not None:
+            out, attn_weight = self.attention(out, encoder_outputs)
+
+        gumbel_t = self.add_gumbel(self.lstm2out(out.squeeze(1)))
+        next_token = torch.argmax(gumbel_t, dim=1).detach()
+        # next_token_onehot = F.one_hot(next_token, cfg.vocab_size).float()  # not used yet
+        next_token_onehot = None
+
+        pred = F.softmax(gumbel_t * self.temperature, dim=-1)  # batch_size * vocab_size
+        # next_o = torch.sum(next_token_onehot * pred, dim=1)  # not used yet
+        next_o = None
+
+        return pred, hidden, next_token, next_token_onehot, next_o
+
+
+    def sample(self, inputs, num_samples, batch_size, one_hot=False, start_letter=cfg.start_letter):
+        """
+        Sample from RelGAN Generator
+        - one_hot: if return pred of RelGAN, used for adversarial training
+        :return:
+            - all_preds: batch_size * seq_len * vocab_size, only use for a batch
+            - samples: all samples
+        """
+        global all_preds
+        num_batch = num_samples // batch_size + 1 if num_samples != batch_size else 1
+        samples = torch.zeros(num_batch * batch_size, self.max_seq_len).long()
+        if one_hot:
+            all_preds = torch.zeros(batch_size, self.max_seq_len, self.vocab_size)
+            if self.gpu:
+                all_preds = all_preds.cuda()
+
+        for b in range(num_batch):
+            encoder_outputs, hidden = self.init_hidden(inputs, batch_size)
+
+            inp = torch.LongTensor([start_letter] * batch_size)
+            if self.gpu:
+                inp = inp.cuda()
+
+            for i in range(self.max_seq_len):
+                pred, hidden, next_token, _, _ = self.step(inp, hidden, encoder_outputs)
+                samples[b * batch_size:(b + 1) * batch_size, i] = next_token
+                if one_hot:
+                    all_preds[:, i] = pred
+                inp = next_token
+        samples = samples[:num_samples]  # num_samples * seq_len
+
+        if one_hot:
+            return all_preds  # batch_size * seq_len * vocab_size
+        return samples
+
+
 if __name__ == "__main__":
     from utils import gradient_penalty
-    G = RelSpaceG(mem_slots=5, num_heads=12, head_size=16, embedding_dim=18, hidden_dim=18, vocab_size=3600, max_seq_len=128, padding_idx=0,
-                 gpu=False)#, module_type='LSTM')
+    # G = RelSpaceG(mem_slots=5, num_heads=12, head_size=16, embedding_dim=18, hidden_dim=18, vocab_size=3600, max_seq_len=128, padding_idx=0,
+    #              gpu=False)#, module_type='LSTM')
+    attention = LuongAttention(18, 18)
+    G = RelGAN_Seq2Seq(embedding_dim=18, hidden_dim=18, vocab_size=3600, max_seq_len=128, padding_idx=0,
+              gpu=True, attention=attention)#, module_type='LSTM')
     data = torch.randint(0, 3600, (32, 128))
-    latents = torch.randn(32, 100)
-    kbins = torch.randn(32, 5)
-    hidden = G.init_hidden(kbins, latents,batch_size=32)
-    # print(hidden.shape)
-    pred = G.forward(data, hidden, need_hidden=False)
-    print(pred.shape)
+    # latents = torch.randn(32, 100)
+    # kbins = torch.randn(32, 5)
+    # hidden = G.init_hidden(kbins, latents,batch_size=32)
+    # # print(hidden.shape)
+    # pred = G.forward(data, hidden, need_hidden=False)
+    # print(pred.shape)
+    
+    inputs = torch.randint(0, 3600, (32, 128))
+    G.cuda()
+    inputs, data = inputs.cuda(), data.cuda()
+    outputs, hidden = G.init_hidden(inputs, batch_size=32)
+    pred = G.forward(data, hidden, need_hidden=False, encoder_outputs=outputs)
+    G.sample(inputs, 32, 32)

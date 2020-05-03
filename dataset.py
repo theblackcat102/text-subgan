@@ -176,41 +176,215 @@ class TextSubspaceDataset(Dataset):
         return self.size
 
 
+
+class KKDayUser(Dataset):
+    def __init__(self, chunk_size, datapath, graph_embedding, 
+        prefix, embedding, max_length, k_bins=5,force_fix_len=False, token_level='word'):
+
+        self.chunk_size = chunk_size
+        self.embedding = embedding
+        self.force_fix_len = force_fix_len
+        self.k_bins = k_bins
+        self.max_length = max_length
+        if token_level == 'word':
+            tokenizer = WordTokenizer()
+        else:
+            tokenizer = CharTokenizer()
+        prefix = token_level+'_'+prefix
+
+        self.idx2word = tokenizer.idx2word
+        self.word2idx = tokenizer.word2idx
+        self.vocab_size = len(self.idx2word)
+        self.tokenizer = tokenizer
+        with open(graph_embedding, 'rb') as f:
+            self.graph_embedding = pickle.load(f)
+        cache_data_name = 'kkday_gan_{}_corpus.pkl'.format(prefix)
+        if os.path.isfile(os.path.join(CACHE_DIR, cache_data_name)):
+            cache = pickle.load(
+                open(os.path.join(CACHE_DIR, cache_data_name), 'rb'))
+            self.data = cache
+        else:
+            self.data = []
+            self.p = []
+            self.latent = []
+            data = {}
+            title_files = [ f for f in glob.glob('data/kkday_dataset/user_data/prod_title_after/*.txt') ]
+            desc_files = [ f for f in glob.glob('data/kkday_dataset/user_data/prod_desc_after/*.txt') ]
+            name2id = self.graph_embedding['name2id']
+
+            print('total: ',len(title_files))
+            print('total: ',len(desc_files))
+
+            data = self.encode_text(title_files, data, 'title')
+            data = self.encode_text(desc_files, data, 'description')
+
+            with open('data/kkday_dataset/user_data/useritem_relations.txt', 'r') as f:
+                for line in f.readlines():
+                    user_id, prod_id = line.strip().split('\t')
+                    if user_id in name2id and prod_id in name2id and prod_id in data and len(data[prod_id]) > 1:
+
+                        self.data.append({
+                            'user': user_id,
+                            'prod': prod_id,
+                            'title': data[prod_id]['title'],
+                            'description': data[prod_id]['description']
+                        })
+            with open(os.path.join(CACHE_DIR, cache_data_name), 'wb') as f:
+                pickle.dump(self.data, f)
+
+        print(len(self.data))
+        self.size = len(self.data)
+
+
+    def __getitem__(self, item):
+        row = self.data[item]
+        def encode_seq(seq):
+            if self.force_fix_len:
+                length = self.max_length
+            else:
+                length = len(seq)
+
+
+            if self.embedding:
+                embedding_seq = np.zeros((len(seq), self.vocab_size))
+                embedding_seq[np.arange(len(seq)), seq] = 1.0
+                seq = embedding_seq
+            return seq, length
+
+        item_id = row['prod']
+        user_id = row['user']
+        item_embedding = self.graph_embedding['embedding'][self.graph_embedding['name2id'][item_id]]
+        user_embedding = self.graph_embedding['embedding'][self.graph_embedding['name2id'][user_id]]
+
+        title_seq, title_length = encode_seq(row['title'])
+        description_seq, description_length = encode_seq(row['description'])
+        return {'title_seq': title_seq, 'title_length': title_length, 
+            'item': item_embedding, 'user': user_embedding,
+            'description_seq': description_seq, 'description_length': description_length}
+
+
+    def encode_text(self, filenames, data, field):
+        for f_ in filenames:
+            filename = os.path.basename(f_)
+            item_id = filename.split('.')[0].split('_')[-1]
+            if item_id not in data:
+                data[item_id] = {}
+            with open(f_, 'r', encoding='UTF-8') as f:
+                title = f.readline().strip().replace('\u3000', ' ')
+                title = self.tokenizer.split(title)
+
+                if len(title) > 0 and len(title) < self.max_length:
+                    encoded = []
+                    for c in title:
+                        if c in self.word2idx:
+                            encoded.append(self.word2idx[c])
+                        else:
+                            encoded.append(self.word2idx[Constants.UNK_WORD])
+
+                    encoded = np.asarray(encoded)
+                    data[item_id][field] = encoded
+        return data      
+
+    def __len__(self):
+        return self.size    
+
 def seq_collate(batch): # only use for word index
-    sequences = []
-    max_length = max([d['length'] for d in batch ])
-    latents, bins = [], []
+    src_sequences = []
+
+    tgt_sequences = []
+
+    if 'length' in batch[0]:
+        tgt_max_length = max([d['length'] for d in batch ])
+        src_max_length = max([d['length'] for d in batch ])
+    else:
+        tgt_max_length = max([d['description_length'] for d in batch ])
+        src_max_length = max([d['title_length'] for d in batch ])
+
+    latents, bins, users, items = [], [], [], []
 
     for data in batch:
         if 'bins' in data:
             bins.append(data['bins'])
             latents.append(data['latent'])
+        if 'item' in data:
+            items.append(data['item'])
+            users.append(data['user'])
+        if 'seq' in data:
+            src_sequences.append(pad_sequence(data['seq'], src_max_length))
+        else:
 
-        sequences.append(pad_sequence(data['seq'], max_length))
-    sequences = np.stack(sequences)
-    sequences = torch.from_numpy(sequences).long()
-    data = {'seq': sequences, 'length': max_length }
+            tgt_sequences.append(pad_sequence(data['title_seq'], tgt_max_length))
+            src_sequences.append(pad_sequence(data['description_seq'], src_max_length))
+
+    src_sequences = np.stack(src_sequences)
+    src_sequences = torch.from_numpy(src_sequences).long()
+
+
+    data = {'seq': src_sequences, 'length': tgt_max_length }
+
+    if len(tgt_sequences) > 0:
+        tgt_sequences = np.stack(tgt_sequences)
+        tgt_sequences = torch.from_numpy(tgt_sequences).long()
+
+        data = {
+            'src': src_sequences, 'src_len': src_max_length,
+            'tgt': tgt_sequences, 'tgt_len': tgt_max_length,
+        }
+
     if len(latents) > 0:
         latents = torch.from_numpy(np.array(latents)).float()
         bins = torch.from_numpy(np.array(bins)).long()
         data['bins'] = bins
         data['latents'] = latents
+
+    if len(items) > 0:
+        # users = torch.from_numpy(np.array(users)).float()
+        items = torch.from_numpy(np.array(items)).float()
+        data['items'] = items
+        users = torch.from_numpy(np.array(users)).float()
+        data['users'] = users
+
+        # data['users'] = users
+
     return data
+
+
+
+def pad_items(items, max_items=6):
+    item_dim = len(items[0])
+    pad_size = max(max_items - len(items), 0)
+    for _ in range(pad_size):
+        items.append(np.zeros(item_dim))
+    return items[:max_items]
+
+def convert_bipartile():
+    with open('data/kkday_dataset/user_data/user_records.txt', 'r') as f, open('data/kkday_dataset/user_data/useritem_relations.txt', 'w') as g:
+        for line in f.readlines():
+            relations = line.strip().split(',')
+            user = relations[0]
+            items = relations[1:]
+            for item in items:
+                if len(item) > 0:
+                    g.write(f'{user}\t{item}\n')
+            
 
 if __name__ == "__main__":
     import torch
 
-    dataset = TextSubspaceDataset(-1, 'data/kkday_dataset/train_title.txt', prefix='train_title', embedding=None, max_length=50, token_level='char')
+    dataset = KKDayUser(-1, 'data/kkday_dataset/user_data', 
+        'data/kkday_dataset/matrix_factorized_64.pkl',
+        prefix='item_graph', embedding=None, max_length=500, token_level='word')
     # dataset = TextDataset(-1, 'data/kkday_dataset/train_article.txt', prefix='train_article', embedding=None, max_length=256)
     # dataset = TextDataset(-1, 'data/kkday_dataset/valid_title.txt', prefix='valid_title', embedding=None, max_length=128)
     # dataset = TextDataset(-1, 'data/kkday_dataset/valid_article.txt', prefix='valid_article', embedding=None, max_length=256)
     # dataset = TextDataset(-1, 'data/kkday_dataset/test_title.txt', prefix='test_title', embedding=None, max_length=128)
     # dataset = TextDataset(-1, 'data/kkday_dataset/test_article.txt', prefix='test_article', embedding=None, max_length=256)
-    print(dataset.vocab_size)
+    # print(dataset.vocab_size)
     dataloader = torch.utils.data.DataLoader(dataset, 
-        collate_fn=seq_collate, batch_size=64)
-    dataset.calculate_stats()
+        collate_fn=seq_collate, batch_size=32)
+    # dataset.calculate_stats()
     from tqdm import tqdm
     for batch in tqdm(dataloader):
-        batch['seq'].shape
-        batch['latents'].shape
+        batch['items'].shape
+        # print(len(batch['src']))
+    convert_bipartile()
