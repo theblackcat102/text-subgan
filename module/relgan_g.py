@@ -193,18 +193,16 @@ class RelSpaceG(RelGAN_G):
 class RelGAN_Seq2Seq(RelGAN_G):
     def __init__( self, embedding_dim, hidden_dim, vocab_size, max_seq_len, padding_idx,
             k_bins=5, latent_dim=100, noise_dim=100, enc_layers=2, enc_bidirect=True,
-            attention=None,
+            attention=True,
             gpu=False):
         super(RelGAN_Seq2Seq, self).__init__(-1, -1, -1, embedding_dim, hidden_dim, vocab_size, max_seq_len, padding_idx,
             gpu, 'LSTM')
         self.encoder = Encoder( embedding_dim, hidden_dim,  num_layers=enc_layers, dropout=0.1, 
             bidirectional=enc_bidirect, cell=nn.LSTM )
         self.attention = LuongAttention(hidden_dim, hidden_dim)
-
-        if attention is not None:
-            self.lstm2out = nn.Linear(hidden_dim * 2, self.vocab_size)
-        else:
-            self.lstm2out = nn.Linear(hidden_dim, self.vocab_size)
+        if attention:
+            self.down_sample = nn.Linear(hidden_dim*2, hidden_dim)
+        self.lstm2out = nn.Linear(hidden_dim, self.vocab_size, bias=False)
 
 
 
@@ -231,6 +229,7 @@ class RelGAN_Seq2Seq(RelGAN_G):
         if self.attention is not None:
             out, attn_weight = self.attention(out, encoder_outputs)
             out = out.contiguous().view(-1, self.hidden_dim*2)  # out: (batch_size * len) * hidden_dim
+            out = self.down_sample(out)
         else:
             out = out.contiguous().view(-1, self.hidden_dim)  # out: (batch_size * len) * hidden_dim
 
@@ -260,6 +259,7 @@ class RelGAN_Seq2Seq(RelGAN_G):
 
         if self.attention is not None:
             out, attn_weight = self.attention(out, encoder_outputs)
+            out = self.down_sample(out)
 
         gumbel_t = self.add_gumbel(self.lstm2out(out.squeeze(1)))
         next_token = torch.argmax(gumbel_t, dim=1).detach()

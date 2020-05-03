@@ -196,6 +196,40 @@ class SubSpaceRelGANTrainer():
             writer.add_text("Text", samples, step)
             writer.flush()
 
+    def pretrain_generator(self, epochs, writer=None):
+        iter_ = 0
+        for epoch in range(epochs):
+            print('Epoch '+ str(epoch))
+            with tqdm(total=len(self.pretrain_dataloader), dynamic_ncols=True) as pbar:
+                for batch in self.pretrain_dataloader:
+                    batch = next(self.data_iterator)
+                    src_inputs = batch['src']
+                    items, users = batch['items'], batch['users']
+                    inputs, target = batch['tgt'][:, :-1], batch['tgt'][:, 1:]
+
+                    if cfg.CUDA:
+                        inputs, items, users = inputs.cuda(), items.cuda(), users.cuda()
+                        src_inputs = src_inputs.cuda()
+                        inputs = inputs.cuda()
+                        target = target.cuda()
+
+                    batch_size = inputs.shape[0]
+                    encoder_outputs, hidden = self.G.init_hidden(src_inputs, batch_size=batch_size)
+                    pred = self.G.forward(inputs, hidden, encoder_outputs, need_hidden=False)
+                    self.gen_opt.zero_grad()
+                    loss = self.mle_criterion(pred, target.flatten())
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.G.parameters(), cfg.clip_norm)
+                    self.gen_opt.step()
+                    iter_ += 1
+                    pbar.update(1)
+                    pbar.set_description('loss: {:.4f}'.format(loss.item()))
+                    if iter_ % cfg.pre_log_step == 0 and writer is not None:
+                        writer.add_scalar('pretrain/loss', loss.item(), iter_)
+
+            torch.save(self.G.state_dict(), 'save/user_prod_relgan_G_pretrained_{}.pt'.format(self.args.tokenize))
+
+
     def calculate_bleu(self, writer, step=0, size=5000, ngram=4):
         '''
             writer: tensorboardX writer
@@ -264,7 +298,9 @@ class SubSpaceRelGANTrainer():
         batch = next(self.data_iterator)
         src = batch['src']
         self.src_sample = src.cuda()
-
+        print(self.G.lstm2out.weight.shape)
+        self.G.lstm2out.weight.data.copy_(self.G.embeddings.weight.data)
+        self.pretrain_generator(100)
         self.sample_results(None)
         self.adv_train_generator()
         self.adv_train_discriminator()
@@ -299,9 +335,9 @@ class SubSpaceRelGANTrainer():
                 embedding_weight[idx] = torch.from_numpy(model[word]).float()
                 hit += 1
             embedding_weight = embedding_weight.cuda()
-            print(f'hit rate {hit}')
             self.G.embeddings.weight.data.copy_(embedding_weight)
             self.G.embeddings.cuda()
+            self.G.lstm2out.weight.data.copy_(self.G.embeddings.weight.data)
 
         if self.args.gen_embed_dim == self.args.dis_embed_dim:
             self.D.embeddings.weight.data.copy_(self.G.embeddings.weight.data.T)
@@ -311,6 +347,13 @@ class SubSpaceRelGANTrainer():
         src = batch['src']
         # fix latent feature
         self.src_sample = src.cuda()
+
+        if args.pretrain_gen is not None:
+            gen_dict = torch.load(args.pretrain_gen)
+            self.G.load_state_dict(gen_dict)
+        else:
+            self.pretrain_generator(args.pretrain_epochs, writer=writer)
+
         # resample_freq = len(self.dataset) // self.args.batch_size
         # print(resample_freq)
         # if writer != None:
