@@ -66,7 +66,7 @@ class VAE_Cluster(nn.Module):
     def forward(self, text_latent, d_embedding):
         latent = torch.cat([text_latent, d_embedding], axis=1)
         embed = self.linear(latent)
-        embed = self.relu(embed)
+        embed_ = self.relu(embed)
         logits = self.logits(embed)
         return logits, embed
 

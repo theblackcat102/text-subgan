@@ -6,10 +6,11 @@ from tqdm import tqdm
 import os, glob, json
 import config as cfg
 
-from module.relgan_d import RelSpaceGAN_D
+from module.relgan_d import RelSeqGAN_D
 from module.cluster import VAE_Cluster
 from module.relgan_g import RelGAN_Seq2Seq
 from module.seq2seq import LuongAttention
+from module.vae import GaussianKLLoss
 from dataset import KKDayUser, seq_collate
 from constant import Constants
 import fasttext
@@ -50,13 +51,18 @@ class SubSpaceRelGANTrainer():
         self.pretrain_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=4,
                         collate_fn=seq_collate, batch_size=args.batch_size*4, shuffle=True)
 
+        self.val_dataset = KKDayUser(-1, 'data/kkday_dataset/user_data', 
+            'data/kkday_dataset/matrix_factorized_64.pkl',
+            prefix='item_graph', is_train=False,embedding=None, max_length=args.max_seq_len, force_fix_len=args.grad_penalty or args.full_text, 
+            token_level=args.tokenize)
+
         self.G = RelGAN_Seq2Seq(args.gen_embed_dim, 
             args.gen_hidden_dim, dataset.vocab_size,
             latent_dim=args.gen_latent_dim, noise_dim=args.gen_noise_dim,
             max_seq_len=args.max_seq_len-1, padding_idx=Constants.PAD, gpu=True)
 
-        self.D = RelSpaceGAN_D(args.dis_embed_dim, args.max_seq_len-1, args.num_rep, dataset.vocab_size, Constants.PAD,
-            kbins=K_BINS, gpu=True, dropout=0.25)
+        self.D = RelSeqGAN_D(args.dis_embed_dim, args.max_seq_len-1, args.num_rep, dataset.vocab_size, Constants.PAD,
+            prod_size=len(self.dataset.prod2id), gpu=True, dropout=0.25)
 
         self.C = VAE_Cluster(64, 64, k_bins=K_BINS, output_embed_dim=100)
         self.C.cuda()
@@ -74,6 +80,8 @@ class SubSpaceRelGANTrainer():
 
         self.mle_criterion = nn.NLLLoss(ignore_index=Constants.PAD)
         self.KL_criterion = nn.KLDivLoss(reduction='batchmean')
+        self.KL_loss = GaussianKLLoss()
+
         self.dis_criterion = nn.CrossEntropyLoss()
 
         self.data_iterator = data_iter(self.dataloader)
@@ -87,47 +95,50 @@ class SubSpaceRelGANTrainer():
             batch = next(self.data_iterator)
             src_inputs = batch['src']
             items, users = batch['items'], batch['users']
+            item_ids = batch['item_ids']
             inputs, target = batch['tgt'][:, :-1], batch['tgt'][:, 1:]
 
             if cfg.CUDA:
                 inputs, items, users = inputs.cuda(), items.cuda(), users.cuda()
                 src_inputs = src_inputs.cuda()
+                item_ids = item_ids.cuda()
                 inputs = inputs.cuda()
                 target = target.cuda()
 
             batch_size = inputs.shape[0]
             real_samples = F.one_hot(target, self.args.vocab_size).float()
 
-            d_out_real, kbins_real, embed_real = self.D(real_samples)
-
+            d_out_real, d_aux_real, _ = self.D(real_samples)
+            aux_real_loss = self.dis_criterion(d_aux_real, item_ids)
             # Train cluster module
-            _c_logits, _ = self.C(items, users)
-            c_logits = F.softmax(_c_logits, 1)
-            c_bins = torch.argmax(c_logits, 1).long()
+            _c_logits, embed = self.C(items, users)
 
-            gen_samples = self.G.sample(src_inputs, batch_size, batch_size, one_hot=True)
+            gen_samples, means, stds = self.G.sample(src_inputs, _c_logits, batch_size, batch_size, one_hot=True)
             # backprop discriminator gradient back to generator via gumbel softmax
-            d_out_fake, kbins_fake, embed_fake = self.D(gen_samples)
+            d_out_fake, d_aux_fake, _ = self.D(gen_samples)
             g_loss, _ = get_losses(d_out_real, d_out_fake, self.args.loss_type)
-            bin_loss = self.dis_criterion(kbins_fake, c_bins)
-            _c_logits = F.log_softmax(_c_logits, dim=1)
-            # c_loss = self.KL_criterion(_c_logits, norm_kbins_)
 
-            loss = self.args.g_weight*g_loss #+ self.args.c_weight*c_loss + bin_loss * 0.5
-            # if self.args.bin_weight > 0:
-            #     loss += bin_loss * self.args.bin_weight
+            aux_fake_loss = self.dis_criterion(d_aux_fake, item_ids)
+
+            kl_loss = self.KL_loss(means, stds)
+
+            bin_loss = aux_fake_loss + aux_real_loss
+
+            loss = self.args.g_weight*g_loss + 10*kl_loss + bin_loss
+
 
             self.gen_adv_opt.zero_grad()
             loss.backward(retain_graph=False)
             torch.nn.utils.clip_grad_norm_(self.G.parameters(), cfg.clip_norm)
+            torch.nn.utils.clip_grad_norm_(self.C.parameters(), cfg.clip_norm)
             self.gen_adv_opt.step()
 
             total_g_loss += g_loss.item()
-            # total_bin_loss += bin_loss.item()
+            total_bin_loss += bin_loss.item()
             total_loss += loss.item()
             # total_c_loss += c_loss.item()
 
-        return total_loss / g_step, total_g_loss / g_step #, total_bin_loss / g_step, total_c_loss / g_step
+        return total_loss / g_step, total_g_loss / g_step , total_bin_loss / g_step # , total_c_loss / g_step
 
     def adv_train_discriminator(self, d_step=1):
         total_loss = 0
@@ -137,38 +148,39 @@ class SubSpaceRelGANTrainer():
             batch = next(self.data_iterator)
             src_inputs = batch['src']
             items, users = batch['items'], batch['users']
+            item_ids = batch['item_ids']
             inputs, target = batch['tgt'][:, :-1], batch['tgt'][:, 1:]
 
             if cfg.CUDA:
                 inputs, items, users = inputs.cuda(), items.cuda(), users.cuda()
                 src_inputs = src_inputs.cuda()
+                item_ids = item_ids.cuda()
                 inputs = inputs.cuda()
                 target = target.cuda()
 
             batch_size = inputs.shape[0]
             real_samples = F.one_hot(target, self.args.vocab_size).float()
-            d_out_real, kbins_real, embed_real = self.D(real_samples)
-            c_logits, _ = self.C(items, users)
+            d_out_real, d_aux_real, _ = self.D(real_samples)
+            c_logits, embed = self.C(items, users)
             c_logits = F.softmax(c_logits, 1)
             c_bins = torch.argmax(c_logits, 1).long()
 
             with torch.no_grad():
-                gen_samples = self.G.sample(src_inputs, batch_size, batch_size, one_hot=True)
+                gen_samples, _, _ = self.G.sample(src_inputs, c_logits, batch_size, batch_size, one_hot=True)
 
 
             # ===Train===
-            d_out_fake, kbins_fake, embed_fake = self.D(gen_samples.detach())
+            d_out_fake, d_aux_fake, _ = self.D(gen_samples.detach())
             _, d_loss = get_losses(d_out_real, d_out_fake, self.args.loss_type)
 
             if self.args.grad_penalty:
                 d_gp_loss = gradient_penalty(self.D, real_samples, gen_samples.detach())
                 d_loss += self.args.gp_weight*d_gp_loss
 
-            bin_loss = self.dis_criterion(kbins_real, c_bins)
-
-            loss = d_loss + bin_loss * 0.5
-            # if self.args.bin_weight > 0:
-            #     loss += bin_loss * self.args.bin_weight
+            fake_bin_loss = self.dis_criterion(d_aux_fake, item_ids)
+            real_bin_loss = self.dis_criterion(d_aux_real, item_ids)
+            bin_loss = fake_bin_loss + real_bin_loss
+            loss = d_loss + bin_loss
 
             self.dis_opt.zero_grad()
             loss.backward(retain_graph=False)
@@ -176,13 +188,14 @@ class SubSpaceRelGANTrainer():
             self.dis_opt.step()
 
             total_loss += loss.item()
-            # total_bin_loss += bin_loss.item()
+            total_bin_loss += bin_loss.item()
             total_d_loss += d_loss.item()
 
-        return total_loss / d_step, total_d_loss / d_step #, total_bin_loss / d_step
+        return total_loss / d_step, total_d_loss / d_step, total_bin_loss / d_step
 
     def sample_results(self, writer, step=0):
-        results = self.G.sample(self.src_sample[:10], 10, 10)
+        logits, embed = self.C(self.item_sample[:10,], self.user_sample[:10,] )
+        results, _, _ = self.G.sample(self.src_sample[:10], logits, 10, 10)
         samples = ''
         for idx, sent in enumerate(results):
             sentence = []
@@ -214,10 +227,14 @@ class SubSpaceRelGANTrainer():
                         target = target.cuda()
 
                     batch_size = inputs.shape[0]
-                    encoder_outputs, hidden = self.G.init_hidden(src_inputs, batch_size=batch_size)
+                    logits, embed  = self.C(items, users )
+
+                    encoder_outputs, hidden, mean, std = self.G.init_hidden(src_inputs, logits, batch_size=batch_size)
+                    kl_loss = self.KL_loss(mean, std)
+
                     pred = self.G.forward(inputs, hidden, encoder_outputs, need_hidden=False)
                     self.gen_opt.zero_grad()
-                    loss = self.mle_criterion(pred, target.flatten())
+                    loss = self.mle_criterion(pred, target.flatten()) + 10*kl_loss
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.G.parameters(), cfg.clip_norm)
                     self.gen_opt.step()
@@ -236,7 +253,7 @@ class SubSpaceRelGANTrainer():
             step: which iteration step
             size: compare a total of 1k sentences
         '''
-        eval_dataloader = torch.utils.data.DataLoader(self.dataset, num_workers=8,
+        eval_dataloader = torch.utils.data.DataLoader(self.val_dataset, num_workers=8,
                         collate_fn=seq_collate, batch_size=20, shuffle=False)
         sentences, references = [], []
         scores_weights = { str(gram): [1/gram] * gram for gram in range(1, ngram+1)  }
@@ -247,14 +264,16 @@ class SubSpaceRelGANTrainer():
             for batch in eval_dataloader:
                 src_inputs = batch['src']
                 inputs, target = batch['tgt'][:, :-1], batch['tgt'][:, 1:]
-
+                items, users = batch['items'], batch['users']
                 if cfg.CUDA:
                     src_inputs = src_inputs.cuda()
+                    items, users = items.cuda(), users.cuda()
                     # inputs = inputs.cuda()
                     # target = target.cuda()
 
-                batch_size = src_inputs.shape[0]                
-                results = self.G.sample(src_inputs, batch_size, batch_size)
+                batch_size = src_inputs.shape[0]
+                logits, embed = self.C(items, users)
+                results, _, _ = self.G.sample(src_inputs, logits, batch_size, batch_size)
 
                 for idx, sent_token in enumerate(batch['tgt'][:, 1:]):
                     reference = []
@@ -297,10 +316,13 @@ class SubSpaceRelGANTrainer():
         from time import time
         batch = next(self.data_iterator)
         src = batch['src']
+        items, users = batch['items'], batch['users']
+        self.item_sample, self.user_sample = items.cuda(), users.cuda()
+
         self.src_sample = src.cuda()
         print(self.G.lstm2out.weight.shape)
         self.G.lstm2out.weight.data.copy_(self.G.embeddings.weight.data)
-        self.pretrain_generator(100)
+        # self.pretrain_generator(100)
         self.sample_results(None)
         self.adv_train_generator()
         self.adv_train_discriminator()
@@ -327,49 +349,56 @@ class SubSpaceRelGANTrainer():
         # else:
         #     self.pretrain_generator(args.pretrain_epochs, writer=writer)
 
-        if self.args.pretrain_embeddings != None:
-            model = fasttext.load_model(self.args.pretrain_embeddings)
-            embedding_weight = self.G.embeddings.cpu().weight.data
-            hit = 0
-            for word, idx in self.dataset.word2idx.items():
-                embedding_weight[idx] = torch.from_numpy(model[word]).float()
-                hit += 1
-            embedding_weight = embedding_weight.cuda()
-            self.G.embeddings.weight.data.copy_(embedding_weight)
-            self.G.embeddings.cuda()
-            self.G.lstm2out.weight.data.copy_(self.G.embeddings.weight.data)
 
-        if self.args.gen_embed_dim == self.args.dis_embed_dim:
-            self.D.embeddings.weight.data.copy_(self.G.embeddings.weight.data.T)
 
         # fix our latent feature for sampling
         batch = next(self.data_iterator)
         src = batch['src']
         # fix latent feature
+        items, users = batch['items'], batch['users']
+        self.item_sample, self.user_sample = items.cuda(), users.cuda()
         self.src_sample = src.cuda()
 
         if args.pretrain_gen is not None:
             gen_dict = torch.load(args.pretrain_gen)
             self.G.load_state_dict(gen_dict)
         else:
+            if self.args.pretrain_embeddings != None:
+                model = fasttext.load_model(self.args.pretrain_embeddings)
+                embedding_weight = self.G.embeddings.cpu().weight.data
+                hit = 0
+                for word, idx in self.dataset.word2idx.items():
+                    embedding_weight[idx] = torch.from_numpy(model[word]).float()
+                    hit += 1
+                embedding_weight = embedding_weight.cuda()
+                self.G.embeddings.weight.data.copy_(embedding_weight)
+                self.G.embeddings.cuda()
+                self.G.lstm2out.weight.data.copy_(self.G.embeddings.weight.data)
+
             self.pretrain_generator(args.pretrain_epochs, writer=writer)
+
+
+
+        if self.args.gen_embed_dim == self.args.dis_embed_dim:
+            self.D.embeddings.weight.data.copy_(self.G.embeddings.weight.data.T)
 
         # resample_freq = len(self.dataset) // self.args.batch_size
         # print(resample_freq)
         # if writer != None:
         #     writer.add_histogram('K_Bins', self.dataset.p, 0)
         #     writer.add_histogram('Latent', self.dataset.latent, 0)
+        self.calculate_bleu(writer, -1, size=10000)
 
         # start training...
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
                 # update discriminator
                 self.D.train()
-                d_t_loss, d_loss = self.adv_train_discriminator(d_step=self.args.dis_steps)
+                d_t_loss, d_loss, d_c_loss = self.adv_train_discriminator(d_step=self.args.dis_steps)
 
                 # update generator
                 self.G.train()
-                g_t_loss, g_loss = self.adv_train_generator(g_step=self.args.gen_steps)
+                g_t_loss, g_loss, g_c_loss = self.adv_train_generator(g_step=self.args.gen_steps)
 
 
                 self.update_temp(i, args.iterations)
@@ -391,10 +420,12 @@ class SubSpaceRelGANTrainer():
                 if i % cfg.adv_log_step == 0 and writer != None:
                     writer.add_scalar('G/loss', g_t_loss, i)
                     writer.add_scalar('G/g_loss', g_loss, i)
+                    writer.add_scalar('G/c_loss', g_c_loss, i)
                     writer.add_scalar('G/temp', self.G.temperature, i)
 
                     writer.add_scalar('D/loss', d_t_loss, i)
                     writer.add_scalar('D/d_loss', d_loss, i)
+                    writer.add_scalar('D/c_loss', d_c_loss, i)
 
 
                 pbar.update(1)

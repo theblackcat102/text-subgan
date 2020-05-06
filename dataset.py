@@ -179,12 +179,12 @@ class TextSubspaceDataset(Dataset):
 
 class KKDayUser(Dataset):
     def __init__(self, chunk_size, datapath, graph_embedding, 
-        prefix, embedding, max_length, k_bins=5,force_fix_len=False, token_level='word'):
+        prefix, embedding, max_length, is_train=True,force_fix_len=False, token_level='word'):
 
         self.chunk_size = chunk_size
         self.embedding = embedding
         self.force_fix_len = force_fix_len
-        self.k_bins = k_bins
+
         self.max_length = max_length
         if token_level == 'word':
             tokenizer = WordTokenizer()
@@ -198,18 +198,21 @@ class KKDayUser(Dataset):
         self.tokenizer = tokenizer
         with open(graph_embedding, 'rb') as f:
             self.graph_embedding = pickle.load(f)
-        cache_data_name = 'kkday_gan_{}_corpus.pkl'.format(prefix)
+        cache_data_name = 'kkday_gan_{}_corpus_v3.pkl'.format(prefix)
         if os.path.isfile(os.path.join(CACHE_DIR, cache_data_name)):
             cache = pickle.load(
                 open(os.path.join(CACHE_DIR, cache_data_name), 'rb'))
-            self.data = cache
+            self.data = cache['data']
+            self.prod2id = cache['prod2id']
         else:
             self.data = []
-            self.p = []
-            self.latent = []
+            self.user2id = {}
+            self.prod2id = {}
             data = {}
             title_files = [ f for f in glob.glob('data/kkday_dataset/user_data/prod_title_after/*.txt') ]
             desc_files = [ f for f in glob.glob('data/kkday_dataset/user_data/prod_desc_after/*.txt') ]
+            template_files = [ f for f in glob.glob('data/kkday_dataset/user_data/prod_template_after/*.txt') ]
+
             name2id = self.graph_embedding['name2id']
 
             print('total: ',len(title_files))
@@ -217,22 +220,43 @@ class KKDayUser(Dataset):
 
             data = self.encode_text(title_files, data, 'title')
             data = self.encode_text(desc_files, data, 'description')
+            data = self.encode_text(template_files, data, 'template')
 
+            products, users = [], []
             with open('data/kkday_dataset/user_data/useritem_relations.txt', 'r') as f:
                 for line in f.readlines():
                     user_id, prod_id = line.strip().split('\t')
-                    if user_id in name2id and prod_id in name2id and prod_id in data and len(data[prod_id]) > 1:
-
+                    if user_id in name2id and prod_id in name2id and prod_id in data and len(data[prod_id]) > 1 \
+                        and len(data[prod_id]['title']) > 0:
+                        products.append(prod_id)
+                        users.append(user_id)
                         self.data.append({
                             'user': user_id,
                             'prod': prod_id,
                             'title': data[prod_id]['title'],
+                            'template': data[prod_id]['template'],
                             'description': data[prod_id]['description']
                         })
+
+            unique_prod = list(set(products))
+            for id_ in unique_prod:
+                self.prod2id[id_] = len(self.prod2id)
+            unique_user = list(set(users))
+            for id_ in unique_user:
+                self.user2id[id_] = len(self.user2id)
+
+            print(f'Unique {len(self.user2id)}, {len(self.prod2id)}')
+
             with open(os.path.join(CACHE_DIR, cache_data_name), 'wb') as f:
-                pickle.dump(self.data, f)
+                pickle.dump({'data': self.data, 'user2id': self.user2id, 'prod2id': self.prod2id}, f)
 
         print(len(self.data))
+        flag = int(len(self.data)*0.8)
+        if is_train:
+            self.data = self.data[:flag]
+        else:
+            self.data = self.data[flag:]
+
         self.size = len(self.data)
 
 
@@ -258,9 +282,14 @@ class KKDayUser(Dataset):
 
         title_seq, title_length = encode_seq(row['title'])
         description_seq, description_length = encode_seq(row['description'])
-        return {'title_seq': title_seq, 'title_length': title_length, 
+        template_seq, template_length = encode_seq(row['template'])
+
+        return {
             'item': item_embedding, 'user': user_embedding,
-            'description_seq': description_seq, 'description_length': description_length}
+            'title_seq': title_seq, 'title_length': title_length, 
+            'description_seq': description_seq, 'description_length': description_length, 
+            'template_seq': template_seq, 'template_length': template_length,
+            'id': self.prod2id[item_id]}
 
 
     def encode_text(self, filenames, data, field):
@@ -290,7 +319,7 @@ class KKDayUser(Dataset):
 
 def seq_collate(batch): # only use for word index
     src_sequences = []
-
+    tmp_sequences = []
     tgt_sequences = []
 
     if 'length' in batch[0]:
@@ -299,8 +328,9 @@ def seq_collate(batch): # only use for word index
     else:
         tgt_max_length = max([d['description_length'] for d in batch ])
         src_max_length = max([d['title_length'] for d in batch ])
+        tmp_max_length = max([d['template_length'] for d in batch ])
 
-    latents, bins, users, items = [], [], [], []
+    latents, bins, users, items, item_ids = [], [], [], [], []
 
     for data in batch:
         if 'bins' in data:
@@ -309,10 +339,11 @@ def seq_collate(batch): # only use for word index
         if 'item' in data:
             items.append(data['item'])
             users.append(data['user'])
+            item_ids.append(data['id'])
         if 'seq' in data:
             src_sequences.append(pad_sequence(data['seq'], src_max_length))
         else:
-
+            tmp_sequences.append(pad_sequence(data['template_seq'], tgt_max_length))
             tgt_sequences.append(pad_sequence(data['title_seq'], tgt_max_length))
             src_sequences.append(pad_sequence(data['description_seq'], src_max_length))
 
@@ -325,8 +356,11 @@ def seq_collate(batch): # only use for word index
     if len(tgt_sequences) > 0:
         tgt_sequences = np.stack(tgt_sequences)
         tgt_sequences = torch.from_numpy(tgt_sequences).long()
+        tmp_sequences = np.stack(tmp_sequences)
+        tmp_sequences = torch.from_numpy(tmp_sequences).long()
 
         data = {
+            'tmp': tmp_sequences, 'tmp_len': tmp_max_length,
             'src': src_sequences, 'src_len': src_max_length,
             'tgt': tgt_sequences, 'tgt_len': tgt_max_length,
         }
@@ -343,6 +377,8 @@ def seq_collate(batch): # only use for word index
         data['items'] = items
         users = torch.from_numpy(np.array(users)).float()
         data['users'] = users
+        item_ids = torch.from_numpy(np.array(item_ids)).long()
+        data['item_ids'] = item_ids
 
         # data['users'] = users
 
@@ -380,6 +416,7 @@ if __name__ == "__main__":
     # dataset = TextDataset(-1, 'data/kkday_dataset/test_title.txt', prefix='test_title', embedding=None, max_length=128)
     # dataset = TextDataset(-1, 'data/kkday_dataset/test_article.txt', prefix='test_article', embedding=None, max_length=256)
     # print(dataset.vocab_size)
+    print(len(dataset))
     dataloader = torch.utils.data.DataLoader(dataset, 
         collate_fn=seq_collate, batch_size=32)
     # dataset.calculate_stats()

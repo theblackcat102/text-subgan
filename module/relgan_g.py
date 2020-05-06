@@ -90,6 +90,7 @@ class RelGAN_G(LSTMGenerator):
         global all_preds
         num_batch = num_samples // batch_size + 1 if num_samples != batch_size else 1
         samples = torch.zeros(num_batch * batch_size, self.max_seq_len).long()
+
         if one_hot:
             all_preds = torch.zeros(batch_size, self.max_seq_len, self.vocab_size)
             if self.gpu:
@@ -102,16 +103,19 @@ class RelGAN_G(LSTMGenerator):
                 inp = inp.cuda()
 
             for i in range(self.max_seq_len):
-                pred, hidden, next_token, _, _ = self.step(inp, hidden)
+                pred, hidden, next_token, mean, std = self.step(inp, hidden)
+                means.append(mean), stds.append(std)
                 samples[b * batch_size:(b + 1) * batch_size, i] = next_token
                 if one_hot:
                     all_preds[:, i] = pred
                 inp = next_token
         samples = samples[:num_samples]  # num_samples * seq_len
 
+        means, stds = torch.stack(means), torch.stack(stds)
+
         if one_hot:
-            return all_preds  # batch_size * seq_len * vocab_size
-        return samples
+            return all_preds, means, stds  # batch_size * seq_len * vocab_size
+        return samples, means, stds
 
     @staticmethod
     def add_gumbel(o_t, eps=1e-10, gpu=cfg.CUDA):
@@ -200,18 +204,34 @@ class RelGAN_Seq2Seq(RelGAN_G):
         self.encoder = Encoder( embedding_dim, hidden_dim,  num_layers=enc_layers, dropout=0.1, 
             bidirectional=enc_bidirect, cell=nn.LSTM )
         self.attention = LuongAttention(hidden_dim, hidden_dim)
+        self.hidden_dim = hidden_dim
         if attention:
             self.down_sample = nn.Linear(hidden_dim*2, hidden_dim)
+        self.proj = nn.Linear(hidden_dim+latent_dim, hidden_dim)
+
+        self.hidden2mean = nn.Linear(hidden_dim, hidden_dim)
+        self.hidden2std = nn.Linear(hidden_dim, hidden_dim)
+
         self.lstm2out = nn.Linear(hidden_dim, self.vocab_size, bias=False)
 
 
 
-    def init_hidden(self, input_seq, batch_size=cfg.batch_size):
+    def init_hidden(self, input_seq, bins, batch_size=cfg.batch_size):
         inputs = self.embeddings(input_seq)
         outputs, hidden = self.encoder(inputs)
-        hidden = hidden.unsqueeze(0).repeat(2, 1, 1)
+
+        latent = torch.cat([hidden, bins], axis=1)
+        hidden = self.proj(latent)
+
+        mean = self.hidden2mean(hidden)
+        std = self.hidden2std(hidden)
+        latent = torch.randn([inputs.size(0), self.hidden_dim]).cuda()
+        latent = latent * std + mean
+
+
+        hidden = latent.unsqueeze(0).repeat(2, 1, 1)
         h, c = hidden[[0], :, :], hidden[[1], :, :]
-        return outputs, (h, c)
+        return outputs, (h, c), mean, std
 
     def forward(self, inp, hidden, encoder_outputs=None, need_hidden=False):
         """
@@ -273,7 +293,7 @@ class RelGAN_Seq2Seq(RelGAN_G):
         return pred, hidden, next_token, next_token_onehot, next_o
 
 
-    def sample(self, inputs, num_samples, batch_size, one_hot=False, start_letter=cfg.start_letter):
+    def sample(self, inputs, bins, num_samples, batch_size, one_hot=False, start_letter=cfg.start_letter):
         """
         Sample from RelGAN Generator
         - one_hot: if return pred of RelGAN, used for adversarial training
@@ -284,18 +304,19 @@ class RelGAN_Seq2Seq(RelGAN_G):
         global all_preds
         num_batch = num_samples // batch_size + 1 if num_samples != batch_size else 1
         samples = torch.zeros(num_batch * batch_size, self.max_seq_len).long()
+        means, stds = [], []
         if one_hot:
             all_preds = torch.zeros(batch_size, self.max_seq_len, self.vocab_size)
             if self.gpu:
                 all_preds = all_preds.cuda()
 
         for b in range(num_batch):
-            encoder_outputs, hidden = self.init_hidden(inputs, batch_size)
+            encoder_outputs, hidden, mean, std = self.init_hidden(inputs, bins, batch_size)
 
             inp = torch.LongTensor([start_letter] * batch_size)
             if self.gpu:
                 inp = inp.cuda()
-
+            means.append(mean), stds.append(std)
             for i in range(self.max_seq_len):
                 pred, hidden, next_token, _, _ = self.step(inp, hidden, encoder_outputs)
                 samples[b * batch_size:(b + 1) * batch_size, i] = next_token
@@ -304,9 +325,11 @@ class RelGAN_Seq2Seq(RelGAN_G):
                 inp = next_token
         samples = samples[:num_samples]  # num_samples * seq_len
 
+        means, stds = torch.stack(means), torch.stack(stds)
+
         if one_hot:
-            return all_preds  # batch_size * seq_len * vocab_size
-        return samples
+            return all_preds, means, stds  # batch_size * seq_len * vocab_size
+        return samples, means, stds
 
 
 if __name__ == "__main__":
@@ -325,8 +348,9 @@ if __name__ == "__main__":
     # print(pred.shape)
     
     inputs = torch.randint(0, 3600, (32, 128))
+    bins = torch.randn(32, 100).cuda()
     G.cuda()
     inputs, data = inputs.cuda(), data.cuda()
-    outputs, hidden = G.init_hidden(inputs, batch_size=32)
+    outputs, hidden, mean, std = G.init_hidden(inputs, bins, batch_size=32)
     pred = G.forward(data, hidden, need_hidden=False, encoder_outputs=outputs)
-    G.sample(inputs, 32, 32)
+    G.sample(inputs, bins, 32, 32)

@@ -24,6 +24,7 @@ if __name__ == "__main__":
         for key, weights in scores_weights.items():
             scores[key] += sentence_bleu([ref], gen, weights, 
                 smoothing_function=SmoothingFunction().method5)
+
     print(scores, len(reference_corpus))
     for key, weights in scores.items():
         scores[key] /= len(reference_corpus)

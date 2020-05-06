@@ -7,7 +7,6 @@ from constant import Constants
 
 class VariationalEncoder(nn.Module):
     def __init__(self, embedding, latent_dim, hidden_size,
-                k_bins=12, bin_latent_dim=100,noise_dim=100,
                  num_layers=1, dropout=0.1, bidirectional=False, cell=nn.GRU, gpu=True):
         super().__init__()
         self.encoder = Encoder(
@@ -21,46 +20,28 @@ class VariationalEncoder(nn.Module):
         self.gpu = gpu
         self.hidden2mean = nn.Linear(hidden_size, latent_dim)
         self.hidden2std = nn.Linear(hidden_size, latent_dim)
-        self.noise_dim = noise_dim
-        self.latent_proj = nn.Linear(k_bins+bin_latent_dim+noise_dim, hidden_size)
 
-    def forward(self, inputs, init_latent, device):
+    def forward(self, inputs, device):
         # [B x T x embedding_dim]
         inputs = self.embedding(inputs)
         # [1 x B x hidden_size]
-        batch_size = inputs.shape[0]
-        hidden = self.init_hidden(*init_latent, batch_size=batch_size)
-        # [(num_layers x direction_num) x B x hidden_size]
-        hidden = hidden.expand(self.num_layers * self.direction_num, -1, -1)
-        hidden = hidden.contiguous()
-        if self.cell == nn.LSTM:
-            hidden = (hidden, hidden)
-        outputs, hidden = self.encoder(inputs, hidden)
+        outputs, hidden = self.encoder(inputs, None)
         mean = self.hidden2mean(hidden)
         std = self.hidden2std(hidden)
         latent = torch.randn([inputs.size(0), self.latent_dim]).to(device)
         latent = latent * std + mean
         return outputs, latent, mean, std
     
-    def init_hidden(self, kbins, latents, batch_size=64):
-        noise = torch.randn(batch_size, self.noise_dim)
-        if self.gpu:
-            noise = noise.cuda()
-        kbins = kbins
-        latents = latents
-        latent = torch.cat([noise, kbins, latents], axis=1)
-        latent = self.latent_proj(latent)
-        return latent
 
 
 class VariationalDecoder(nn.Module):
     def __init__(self, embedding, hidden_size,
-                 num_layers=1, dropout=0.1, st_mode=False, cell=nn.GRU):
+                 num_layers=1, dropout=0.1, st_mode=False, cell=nn.GRU, attention=None):
         super().__init__()
         self.decoder = Decoder(
             embedding.embedding_dim, embedding.num_embeddings,
             hidden_size, num_layers, dropout, st_mode, cell,
-            None)
+            attention=attention)
         self.embedding = embedding
         self.num_layers = num_layers
         self.cell = cell
@@ -121,8 +102,8 @@ class VariationalAutoEncoder(nn.Module):
         self.decoder = VariationalDecoder(self.embedding, dec_hidden_size,
             num_layers=num_layers, dropout=dropout, st_mode=False, cell=cell).cuda()
 
-    def forward(self, kbins, latent, inputs, device, max_length):
-        outputs, hidden, mean, std = self.encoder(inputs,(kbins, latent), device=device)
+    def forward(self, inputs, device, max_length):
+        outputs, hidden, mean, std = self.encoder(inputs, device=device)
         latent = self.latent2hidden(hidden)
         de_outputs = self.decoder(latent, None, max_length=max_length, device=device)
         return outputs, latent, mean, std, de_outputs
