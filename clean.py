@@ -31,12 +31,11 @@ def is_alpha(word):
 def match_template():
 
     match = {}
-    english_token = ['天鵝堡', 'é', '山麓', '守夜人', '樂園', '鐵塔', '墓穴', '交通', '瘋馬']
+    english_token = ['天鵝堡', 'é', '山麓', '守夜人', '樂園', '鐵塔', '墓穴', '交通', '瘋馬', '高鐵']
     free_token = [
         'JR', 'PASS', 'WiFi', 'Spa', 'G', 'BBQ', 'Hotel', 'airport', 'easy', 'buffet', 'GB', 'CARD', 'IG', 'Ticket', 'Game', '4G'
     ]
     
-
     for dataset in ['test', 'train', 'valid']:
         with open(f'data/kkday_dataset/{dataset}_title.txt', 'r') as f, open(f'data/kkday_dataset/{dataset}_template.txt', 'r') as t:
             title_lines = f.readlines()
@@ -75,6 +74,4 @@ def match_template():
     print(f'fit {match_cnt}/{cnt}')
 
 if __name__ == "__main__":
-
-
     match_template()

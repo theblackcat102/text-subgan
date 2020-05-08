@@ -49,27 +49,21 @@ class Constants:
     BOS = 2
     EOS = 3
     URL = 4
-    SIMLE = 5
-    XD = 6
-    SAD = 7
+    MASKED = 5
 
     PAD_WORD = '</PAD>'
     UNK_WORD = '</UNK>'
     BOS_WORD = '</BOS>'
     EOS_WORD = '</EOS>'
     URL_WORD = '</URL>'
-    SIMLE_WORD = '</SIMLE>'
-    XD_WORD = '</XD>'
-    SAD_WORD = '</SAD>'
+    MASKED_WORD = '##'
 
     PAD_EX = ''
     UNK_EX = '涆'
     BOS_EX = ''
     EOS_EX = ''
     URL_EX = 'https://github.com/w86763777/deeplearning-final-project'
-    SIMLE_EX = ':)'
-    XD_EX = 'XD'
-    SAD_EX = ':('
+    MASKED_EX = '##'
 
     @classmethod
     def word2idx(clazz):
@@ -77,14 +71,19 @@ class Constants:
             clazz, lambda attr: not(inspect.isroutine(attr)))
         word2idx = {}
         for name, v in attrs:
-            if not name.endswith('__') and not name.startswith('__'):
+            if not name.endswith('__') and not name.startswith('__') and name != 'MASKED':
                 if name.endswith('_WORD') or name.endswith('_EX'):
                     continue
                 word2idx['</%s>' % name] = v
+
+            if name == 'MASKED':
+                word2idx['##'] = v
+
         return word2idx
 
     @classmethod
     def idx2word(clazz):
+
         return {v: k for k, v in clazz.word2idx().items()}
 
     @classmethod

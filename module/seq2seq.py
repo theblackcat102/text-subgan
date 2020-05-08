@@ -99,9 +99,8 @@ class Decoder(nn.Module):
             dropout=(0 if num_layers == 1 else dropout),
             batch_first=True)
         if attention is not None:
-            self.outputs2vocab = nn.Linear(hidden_size * 2, vocab_size)
-        else:
-            self.outputs2vocab = nn.Linear(hidden_size, vocab_size)
+            self.proj = nn.Linear(hidden_size*2, hidden_size)
+        self.outputs2vocab = nn.Linear(hidden_size, vocab_size)
 
     def forward(self, inputs, hidden, encoder_outputs=None, temperature=1):
         """
@@ -118,11 +117,10 @@ class Decoder(nn.Module):
         outputs, hidden = self.rnn(inputs, hidden)
         if self.attention is not None:
             outputs, attn_weight = self.attention(outputs, encoder_outputs)
+            outputs = self.proj(outputs)
+
         outputs = self.outputs2vocab(outputs)
-        if self.training:
-            outputs = softmax(outputs, temperature, st_mode=self.st_mode)
-        else:
-            outputs = softmax(outputs, temperature=1, st_mode=False)
+
         return outputs, hidden
 
 

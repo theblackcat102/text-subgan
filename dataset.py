@@ -224,7 +224,7 @@ class KKDayUser(Dataset):
 
             products, users = [], []
             with open('data/kkday_dataset/user_data/useritem_relations.txt', 'r') as f:
-                for line in f.readlines():
+                for line in tqdm(f.readlines()):
                     user_id, prod_id = line.strip().split('\t')
                     if user_id in name2id and prod_id in name2id and prod_id in data and len(data[prod_id]) > 1 \
                         and len(data[prod_id]['title']) > 0:
@@ -250,7 +250,7 @@ class KKDayUser(Dataset):
             with open(os.path.join(CACHE_DIR, cache_data_name), 'wb') as f:
                 pickle.dump({'data': self.data, 'user2id': self.user2id, 'prod2id': self.prod2id}, f)
 
-        print(len(self.data))
+        # print(len(self.data))
         flag = int(len(self.data)*0.8)
         if is_train:
             self.data = self.data[:flag]
@@ -424,4 +424,4 @@ if __name__ == "__main__":
     for batch in tqdm(dataloader):
         batch['items'].shape
         # print(len(batch['src']))
-    convert_bipartile()
+    # convert_bipartile()

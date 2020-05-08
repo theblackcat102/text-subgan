@@ -215,7 +215,6 @@ class SubSpaceRelGANTrainer():
             print('Epoch '+ str(epoch))
             with tqdm(total=len(self.pretrain_dataloader), dynamic_ncols=True) as pbar:
                 for batch in self.pretrain_dataloader:
-                    batch = next(self.data_iterator)
                     src_inputs = batch['src']
                     items, users = batch['items'], batch['users']
                     inputs, target = batch['tgt'][:, :-1], batch['tgt'][:, 1:]

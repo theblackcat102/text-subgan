@@ -86,6 +86,9 @@ if __name__ == "__main__":
     tokenizer = WordTokenizer(corpus)
 
 
+    print(tokenizer.tokenize('【 ## 一 日 遊 】 ## ## 散散心 。 造訪 ## 傳藝 ##'))
+
+
     # training_filename = 'data/kkday_dataset/train_article.txt'
     # with open(training_filename, 'r') as f:
     #     for line in f.readlines():

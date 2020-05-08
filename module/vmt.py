@@ -33,12 +33,12 @@ class VariationalAutoEncoder(nn.Module):
             device = 'cuda'
         outputs, hidden, mean, std = self.encoder(inputs, device=device)
         latent = self.latent2hidden(hidden)
-        de_outputs = self.decoder(latent, None, max_length=max_length, device=device)
+        de_outputs, _ = self.decoder(latent, None, max_length=max_length, device=device)
         return outputs, latent, mean, std, de_outputs
 
 
 class VMT(nn.Module):
-    def __init__( self, embedding_dim, vocab_size, hidden_dim, max_seq_len, padding_idx=Constants.PAD,
+    def __init__( self, embedding_dim, vocab_size, max_seq_len, padding_idx=Constants.PAD,
             tmp_hidden_size=64, tmp_dec_hidden_size=64, tmp_latent_dim=128, desc_latent_dim=87, user_latent_dim=128,
             enc_hidden_size=128, enc_layers=2, enc_bidirect=True, dropout=0.1, dec_layers=2, dec_hidden_size=128, 
             attention=True, 
@@ -56,7 +56,7 @@ class VMT(nn.Module):
 
         self.attention = LuongAttention(dec_hidden_size, dec_hidden_size)
 
-        self.title_decoder =  VariationalDecoder(self.embedding, dec_hidden_size,
+        self.title_decoder = VariationalDecoder(self.embedding, dec_hidden_size,
             num_layers=dec_layers, dropout=dropout, st_mode=False, cell=nn.LSTM, attention=self.attention)
 
         self.merge_proj = nn.Linear(desc_latent_dim+tmp_latent_dim+user_latent_dim, dec_hidden_size)
@@ -64,38 +64,39 @@ class VMT(nn.Module):
         self.max_seq_len = max_seq_len
         self.user_latent_dim = user_latent_dim
         self.vocab_size = vocab_size
+        self.softmax = nn.LogSoftmax(dim=-1)
         self.kl_loss_ = GaussianKLLoss()
         self.mle_criterion = nn.NLLLoss(ignore_index=Constants.PAD)
         self.gpu = gpu
 
     def cycle_template(self, src, output):
-        outputs, latent, mean, std, de_outputs = self.template_vae(src, self.max_seq_len)
+        _, _, mean, std, de_outputs = self.template_vae(src, output.shape[1])
         
         kl_loss = self.kl_loss_(mean, std)
-        print(de_outputs.shape, output.shape)
+        de_outputs =  self.softmax(de_outputs)
+        # print(de_outputs.shape, output.shape)
         nll_loss = self.mle_criterion(de_outputs.view(-1, self.vocab_size), output.flatten())
         return nll_loss, kl_loss
 
     def encode_desc(self, desc, device='cpu'):
         if self.gpu:
             device = 'cuda'
-        outputs, hidden, mean, std = self.content_encoder(inputs,  device=device)
+        outputs, hidden, mean, std = self.content_encoder(desc,  device=device)
         return outputs, hidden, mean, std
 
     def encode_tmp(self, template, device='cpu'):
         if self.gpu:
             device = 'cuda'
-        outputs, hidden, mean, std = self.template_vae.encoder(inputs, device=device)
+        outputs, hidden, mean, std = self.template_vae.encoder(template, device=device)
         return outputs, hidden, mean, std
 
-    def decode(self, tmp_latent, desc_latent, user_feature, desc_outputs, device='cpu', temperature=None):
+    def decode(self, tmp_latent, desc_latent, user_feature, desc_outputs, max_length, device='cpu', temperature=None):
         if self.gpu:
             device = 'cuda'
 
         latent = self.merge_proj(torch.cat([ tmp_latent, desc_latent, user_feature ], axis=1))
-        output_feat = self.title_decoder(latent, desc_outputs, self.max_seq_len, device=device, temperature=temperature)
-
-        return output_feat
+        output_feat, output_logits  = self.title_decoder(latent, desc_outputs, max_length, device=device, temperature=temperature)
+        return output_feat, output_logits
 
 if __name__ == "__main__":
     import torch.nn.functional as F
@@ -106,8 +107,8 @@ if __name__ == "__main__":
 
     desc_outputs, desc_latent, mean, std = vmt.encode_desc(inputs, 'cpu')
     print('description: ',desc_latent.shape)
-    outputs, tmp_latent, mean, std = vmt.encode_tmp(inputs, 'cpu')
     print('template: ',tmp_latent.shape)
+    outputs, tmp_latent, mean, std = vmt.encode_tmp(inputs, 'cpu')
     output_feat = vmt.decode(tmp_latent, desc_latent, user_feat, desc_outputs)
 
     nll_loss, kl_loss = vmt.cycle_template(inputs, inputs)

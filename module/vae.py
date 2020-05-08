@@ -44,6 +44,7 @@ class VariationalDecoder(nn.Module):
             attention=attention)
         self.embedding = embedding
         self.num_layers = num_layers
+        self.log_softmax = nn.LogSoftmax(dim=-1)
         self.cell = cell
 
     def forward(self, latent, encoder_outputs, max_length,
@@ -66,14 +67,39 @@ class VariationalDecoder(nn.Module):
         if self.cell == nn.LSTM:
             hidden = (hidden, hidden)
         outputs = []
+        inp = []
+
         for _ in range(max_length):
             output, hidden = self.decoder(
                 inputs, hidden, encoder_outputs, temperature)
+            output = self.log_softmax(output)
+
             outputs.append(output)
-            topi = torch.argmax(output, dim=-1)
-            inputs = self.embedding(topi.detach())
+
+
+            # multinomial sampling seems better than argmax method
+
+            # next_tokens = []
+            # for batch in range(output.shape[0]):
+            #     next_token = torch.multinomial(torch.exp(output[batch]), 1)
+            #     next_tokens.append(next_token)
+
+            # # [Bx1]
+            # next_tokens = torch.cat(next_tokens, dim=0)
+
+            # argmax method
+            next_tokens = torch.argmax(output, dim=-1)
+
+            # print(next_tokens.shape)
+
+
+            inp.append(next_tokens.squeeze(0))
+            inputs = self.embedding(next_tokens)
+
         outputs = torch.cat(outputs, dim=1)
-        return outputs
+        inp = torch.stack(inp).squeeze(-1).transpose(0,1)
+
+        return outputs, inp
 
 
 class GaussianKLLoss(nn.Module):

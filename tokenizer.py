@@ -43,6 +43,15 @@ class WordTokenizer():
         self.word2idx = word2idx
         self.idx2word = idx2word
 
+    def tokenize(self, sentence):
+        output = []
+        for t in sentence.split(' '):
+            if t in self.word2idx:
+                output.append(self.word2idx[t])
+            else:
+                output.append(self.word2idx['</UNK>'])
+        return output
+
     def split(self, sentence):
         return sentence.split(' ')
     
