@@ -62,6 +62,12 @@ class TemplateTrainer():
     
         args.vocab_size = self.dataset1.vocab_size
         self.args = args
+        max_temp = 1.0
+        temp_min = 0.00005
+        temp = 1.0
+        self.gumbel_temp = temp
+        N = args.iterations
+        self.gumbel_anneal_rate = max_temp / N
 
         # self.cluster_opt = optim.Adam(self.C.parameters(), lr=args.dis_lr)
         self.gen_opt  = optim.Adam(self.model.parameters(), lr=args.gen_lr)
@@ -154,44 +160,43 @@ class TemplateTrainer():
         _, user1_embed = self.C(items1, users1)
         _, user2_embed = self.C(items2, users2)
 
-        nll_loss1, kl_loss1 = self.model.cycle_template(tmp1[:, :-1], tmp1[:, 1:])
-        nll_loss2, kl_loss2 = self.model.cycle_template(tmp2[:, :-1], tmp2[:, 1:])
+        nll_loss1, kl_loss1 = self.model.cycle_template(tmp1[:, :-1], tmp1[:, 1:], temperature=self.gumbel_temp)
+        nll_loss2, kl_loss2 = self.model.cycle_template(tmp2[:, :-1], tmp2[:, 1:], temperature=self.gumbel_temp)
 
         cycle_nll = (nll_loss1+nll_loss2)/2
         cycle_kl = (kl_loss1+kl_loss2)/2
 
-        nll_loss1, kl_loss1 = self.model.cycle_template(inputs1, tmp1[:, 1:])
-        nll_loss2, kl_loss2 = self.model.cycle_template(inputs2, tmp2[:, 1:])
+        nll_loss1, kl_loss1 = self.model.cycle_template(inputs1, tmp1[:, 1:], temperature=self.gumbel_temp)
+        nll_loss2, kl_loss2 = self.model.cycle_template(inputs2, tmp2[:, 1:], temperature=self.gumbel_temp)
         
         title_cycle_nll = (nll_loss1+nll_loss2)/2
         title_cycle_kl = (kl_loss1+kl_loss2)/2
 
         desc1_outputs, desc1_latent, desc1_mean, desc1_std = self.model.encode_desc(src_inputs1)
-        _, tmp1_latent, tmp1_mean, tmp1_std = self.model.encode_tmp(tmp1)
+        _, tmp1_latent = self.model.encode_tmp(tmp1)
         output1_target, output1_logits = self.model.decode(tmp1_latent, desc1_latent, user1_embed, desc1_outputs,
                 max_length=target1.shape[1])
         
 
         desc2_outputs, desc2_latent, desc2_mean, desc2_std = self.model.encode_desc(src_inputs2)
-        _, tmp2_latent, tmp2_mean, tmp2_std = self.model.encode_tmp(tmp2)
+        _, tmp2_latent = self.model.encode_tmp(tmp2)
         output2_target, output2_logits = self.model.decode(tmp2_latent, desc2_latent, user2_embed, desc2_outputs,
             max_length=target2.shape[1])
 
 
         desc_kl_loss = self.KL_loss(desc2_mean, desc2_std) +  self.KL_loss(desc1_mean, desc1_std)
-        tmp_kl_loss = self.KL_loss(tmp2_mean, tmp2_std) +  self.KL_loss(tmp1_mean, tmp1_std)
 
         construct1_loss = self.mle_criterion(output1_target.view(-1, self.args.vocab_size), target1.flatten())
         construct2_loss = self.mle_criterion(output2_target.view(-1, self.args.vocab_size), target2.flatten())
 
         reconstruct_loss = (construct1_loss+construct2_loss)/2
 
-        total_kl_loss = (tmp_kl_loss+desc_kl_loss) + cycle_kl
+        total_kl_loss = desc_kl_loss + cycle_kl
         cycle_nll_loss = cycle_nll
 
-        title_loss = (title_cycle_kl+title_cycle_nll) #* self.temp
+        title_loss = (title_cycle_kl* self.temp+title_cycle_nll)
 
-        total_loss = reconstruct_loss*self.args.re_weight + cycle_nll_loss*self.args.cycle_weight + total_kl_loss*self.args.kl_weight + title_loss
+        total_loss = reconstruct_loss*self.args.re_weight + cycle_nll_loss*self.args.cycle_weight + total_kl_loss* self.temp + title_loss
 
 
 
@@ -212,8 +217,8 @@ class TemplateTrainer():
         logits, embed = self.C(self.items[:sample_size,], self.users[:sample_size,] )
 
         desc1_outputs, desc1_latent, _, _ = self.model.encode_desc(self.descripion[:sample_size])
-        _, tmp1_latent, _, _ = self.model.encode_tmp(self.template[:sample_size])
-        _, tmp2_latent, _, _ = self.model.encode_tmp(self.template2[:sample_size])
+        _, tmp1_latent = self.model.encode_tmp(self.template[:sample_size])
+        _, tmp2_latent = self.model.encode_tmp(self.template2[:sample_size])
         _, output_title = self.model.decode(tmp1_latent, desc1_latent, embed, desc1_outputs,
                 max_length=self.args.max_seq_len)
         _, output_title2 = self.model.decode(tmp2_latent, desc1_latent, embed, desc1_outputs,
@@ -286,7 +291,7 @@ class TemplateTrainer():
                 batch_size = src_inputs.shape[0]
                 logits, embed = self.C(items, users)
                 desc_outputs, desc_latent, _, _ = self.model.encode_desc(src_inputs)
-                _, tmp_latent, _, _ = self.model.encode_tmp(tmp)
+                _, tmp_latent = self.model.encode_tmp(tmp)
                 _, output_title = self.model.decode(tmp_latent, desc_latent, embed, desc_outputs,
                         max_length=self.args.max_seq_len)
                 
@@ -378,6 +383,7 @@ class TemplateTrainer():
             json.dump(vars(self.args), f)
         writer = SummaryWriter('logs/temp_{}-{}'.format(self.args.name, cur_time))
         self.temp = args.temperature_min 
+ 
 
         # self.pretrain(1, writer=writer)
 
@@ -396,13 +402,17 @@ class TemplateTrainer():
                     writer.add_scalar('G/kl_loss', total_kl_loss, i)
                     writer.add_scalar('G/reconstruct_loss', reconstruct_loss, i)
                     writer.add_scalar('G/cycle_nll_loss', cycle_nll_loss, i)
+                    writer.add_scalar('temp/gumbel', self.temp, i)
+                    writer.add_scalar('temp/kl', self.gumbel_temp, i)
 
                 if i % 100 == 0:
                     self.model.eval(), self.C.eval()
                     self.sample_results(writer, i)
                     self.model.train(), self.C.train()
+
                 self.temp = self.update_temp(i, args.iterations)
-                
+                self.gumbel_temp = np.maximum(self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i), 0.00005)
+
                 if i % args.check_iter == 0:
                     torch.save({
                         'model': self.model.state_dict(),
@@ -446,8 +456,8 @@ if __name__ == "__main__":
 
     parser.add_argument('--name', type=str, default='rec_gan')
 
-    parser.add_argument('--tmp-latent-dim', type=int, default=32)
-    parser.add_argument('--desc-latent-dim', type=int, default=128)
+    parser.add_argument('--tmp-latent-dim', type=int, default=128)
+    parser.add_argument('--desc-latent-dim', type=int, default=32)
     parser.add_argument('--user-latent-dim', type=int, default=32)
     parser.add_argument('--gen-embed-dim', type=int, default=128)
 
@@ -482,6 +492,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     trainer = TemplateTrainer(args)
     # trainer.sample_results(None)
+    # trainer.step(1)
     # trainer.calculate_bleu(None, size=1000)
     trainer.train()
     # trainer.pretrain(args.pretrain_epochs)

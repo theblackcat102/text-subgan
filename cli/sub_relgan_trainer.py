@@ -12,7 +12,7 @@ from module.relgan_g import RelSpaceG
 from dataset import TextSubspaceDataset, seq_collate
 from constant import Constants
 from utils import get_fixed_temperature, get_losses
-from sklearn.cluster import KMeans, MiniBatchKMeans
+from sklearn.cluster import SpectralClustering
 import sklearn
 import numpy as np
 from tensorboardX import SummaryWriter
@@ -24,7 +24,7 @@ from shutil import copyfile
 
 
 
-K_BINS = 20
+K_BINS = 5
 
 class SubSpaceRelGANTrainer():
 
@@ -46,8 +46,8 @@ class SubSpaceRelGANTrainer():
         self.D = RelSpaceGAN_D(args.dis_embed_dim, args.max_seq_len-1, args.num_rep, dataset.vocab_size, Constants.PAD,
             kbins=K_BINS, gpu=True, dropout=0.25)
         self.C = Cluster(self.G.embeddings, args.gen_embed_dim, embed_dim=100, k_bins=K_BINS, output_embed_dim=100)
-        self.kmeans = KMeans(n_clusters=K_BINS, random_state=666)
-        self.dataset.p = self.kmeans.fit_predict(self.dataset.latent)
+        self.spectral_cluster = SpectralClustering(n_clusters=K_BINS, random_state=666)
+        self.dataset.p = self.spectral_cluster.fit(self.dataset.latent).labels_
         self.k_bins = K_BINS
         self.C.cuda()
         self.G.cuda()
@@ -334,7 +334,7 @@ class SubSpaceRelGANTrainer():
         # assert self.dataset.p.shape == P.shape
         # update latent space
         self.dataset.latent = context
-        self.dataset.p = self.kmeans.fit_predict(self.dataset.latent)
+        self.dataset.p = self.spectral_cluster.fit(self.dataset.latent).labels_
         if writer != None:
             writer.add_histogram('K_Bins', self.dataset.p, iter)
             writer.add_histogram('Latent', self.dataset.latent, iter)
@@ -409,7 +409,7 @@ class SubSpaceRelGANTrainer():
                         'latent': self.dataset.latent,
                     }, os.path.join(save_path,'relgan_G_{}.pt'.format(i)))
                     torch.save({
-                        'kmeans': self.kmeans,
+                        'spectral_cluster': self.spectral_cluster,
                         'p': self.dataset.p,
                         'latent': self.dataset.latent,
                     }, os.path.join(save_path,'latest_cluster_assignment.pt'))
