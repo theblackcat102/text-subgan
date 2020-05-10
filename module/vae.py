@@ -4,7 +4,7 @@ import torch.nn as nn
 from module.seq2seq import Encoder, Decoder, LuongAttention
 from constant import Constants
 
-
+import torch.nn.functional as F
 class VariationalEncoder(nn.Module):
     def __init__(self, embedding, latent_dim, hidden_size,
                  num_layers=1, dropout=0.1, bidirectional=False, cell=nn.GRU, gpu=True):
@@ -43,12 +43,27 @@ class VariationalDecoder(nn.Module):
             hidden_size, num_layers, dropout, st_mode, cell,
             attention=attention)
         self.embedding = embedding
+        self.vocab_size = embedding.num_embeddings
         self.num_layers = num_layers
         self.log_softmax = nn.LogSoftmax(dim=-1)
         self.cell = cell
 
+    @staticmethod
+    def add_gumbel(o_t, eps=1e-10, gpu=True):
+        """Add o_t by a vector sampled from Gumbel(0,1)"""
+        u = torch.zeros(o_t.size())
+
+        if gpu:
+            u = u.cuda()
+
+        u.uniform_(0, 1)
+        g_t = -torch.log(-torch.log(u + eps) + eps)
+        gumbel_t = o_t + g_t
+        return gumbel_t
+
+
     def forward(self, latent, encoder_outputs, max_length,
-                device, temperature=None):
+                device, temperature=1, gumbel=False):
         """
         Args:
             latent: float tensor, shape = [B x latent_dim]
@@ -69,9 +84,20 @@ class VariationalDecoder(nn.Module):
         outputs = []
         inp = []
 
-        for _ in range(max_length):
+        if gumbel:
+            batch_size = latent.size(0)
+            all_preds = torch.zeros(batch_size, max_length, self.vocab_size).to(device)
+
+        gumbel_outputs = []
+        for idx in range(max_length):
             output, hidden = self.decoder(
-                inputs, hidden, encoder_outputs, temperature)
+                inputs, hidden, encoder_outputs)
+
+            gumbel_t = self.add_gumbel(output)
+            pred = F.softmax(gumbel_t * temperature, dim=-1)  # batch_size * vocab_size
+            if gumbel:
+                all_preds[:, idx, :] = pred.squeeze(1)
+
             output = self.log_softmax(output)
 
             outputs.append(output)
@@ -98,6 +124,8 @@ class VariationalDecoder(nn.Module):
 
         outputs = torch.cat(outputs, dim=1)
         inp = torch.stack(inp).squeeze(-1).transpose(0,1)
+        if gumbel:
+            return outputs, inp, all_preds
 
         return outputs, inp
 
@@ -160,6 +188,9 @@ class VariationalAutoEncoder(nn.Module):
         samples = samples[:num_samples]
 
         return samples
+
+
+
 
 if __name__ == "__main__":
 

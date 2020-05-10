@@ -4,15 +4,16 @@ from module.vae_gumbel import VAE_Gumbel
 from module.vae import VariationalDecoder, VariationalEncoder, GaussianKLLoss
 from module.seq2seq import LuongAttention
 from constant import Constants
-
+import torch.nn.functional as F
 from module.discriminator import CNNDiscriminator
+from module.biset import BiSET
 
 dis_filter_sizes = [2, 3, 4, 5]
 dis_num_filters = [64, 64, 64, 64]
 
 
 class TemplateD(CNNDiscriminator):
-    def __init__(self, embed_dim, max_seq_len, num_rep, vocab_size,padding_idx, latent_dim, gpu=False, dropout=0.25):
+    def __init__(self, embed_dim, max_seq_len, num_rep, vocab_size, latent_dim,  padding_idx=Constants.PAD, gpu=False, dropout=0.25):
         super(TemplateD, self).__init__(embed_dim, vocab_size, dis_filter_sizes, dis_num_filters, padding_idx,
                                        gpu, dropout)
 
@@ -20,15 +21,18 @@ class TemplateD(CNNDiscriminator):
         self.max_seq_len = max_seq_len
         self.feature_dim = sum(dis_num_filters)
         self.emb_dim_single = int(embed_dim / num_rep)
+        self.num_rep = num_rep
 
         self.embeddings = nn.Linear(vocab_size, embed_dim, bias=False)
 
         self.convs = nn.ModuleList([
-            spectral_norm(nn.Conv2d(1, n, (f, self.emb_dim_single), stride=(1, self.emb_dim_single))) for (n, f) in
+            nn.Conv2d(1, n, (f, self.emb_dim_single), stride=(1, self.emb_dim_single)) for (n, f) in
             zip(dis_num_filters, dis_filter_sizes)
         ])
         self.highway = nn.Linear(self.feature_dim, self.feature_dim)
         self.feature2out = nn.Linear(self.feature_dim, latent_dim)
+        self.latent_dim = latent_dim
+        self.out2logits = nn.Linear(self.feature_dim, 1)
         self.dropout = nn.Dropout(dropout)
         self.init_params()
 
@@ -43,13 +47,21 @@ class TemplateD(CNNDiscriminator):
         cons = [F.relu(conv(emb)) for conv in self.convs]  # [batch_size * num_filter * (seq_len-k_h+1) * num_rep]
         pools = [F.max_pool2d(con, (con.size(2), 1)).squeeze(2) for con in cons]  # [batch_size * num_filter * num_rep]
         pred = torch.cat(pools, 1)
+
         pred = pred.permute(0, 2, 1).contiguous().view(-1, self.feature_dim)  # (batch_size * num_rep) * feature_dim
         highway = self.highway(pred)
         pred = torch.sigmoid(highway) * F.relu(highway) + (1. - torch.sigmoid(highway)) * pred  # highway
-        pred = self.feature2out(self.dropout(pred))
-        return pred
+        logits = self.out2logits(pred)
+
+        latent = torch.sum(pred.view(-1, self.num_rep, self.feature_dim), dim=1)
+        pred = self.feature2out(self.dropout(latent))
+
+        return logits, pred
 
 class VariationalAutoEncoder(nn.Module):
+    '''
+        Not to be confused with VariationalAutoEncoder from vae.py, that one is bit more complicated
+    '''
     def  __init__(self, embeddding, embed_dim=64, enc_hidden_size=256, dec_hidden_size=256, # latent dim
                 latent_dim=512, max_seq_len=50,
                  num_layers=2, dropout=0.1, bidirectional=False, cell=nn.GRU, gpu=True,
@@ -86,7 +98,7 @@ class VMT(nn.Module):
     def __init__( self, embedding_dim, vocab_size, max_seq_len, padding_idx=Constants.PAD,
             tmp_hidden_size=64, tmp_dec_hidden_size=64, tmp_latent_dim=16, tmp_category=10, desc_latent_dim=87, user_latent_dim=128,
             enc_hidden_size=128, enc_layers=2, enc_bidirect=True, dropout=0.1, dec_layers=2, dec_hidden_size=128, 
-            attention=True, 
+            attention=True, biset=True,
             gpu=False):
         super(VMT, self).__init__()
 
@@ -105,6 +117,10 @@ class VMT(nn.Module):
             num_layers=dec_layers, dropout=dropout, st_mode=False, cell=nn.LSTM, attention=self.attention)
 
         self.merge_proj = nn.Linear(desc_latent_dim+(tmp_latent_dim*tmp_category)+user_latent_dim, dec_hidden_size)
+
+        self.biset = None
+        if biset:
+            self.biset = BiSET(article_hidden_size=enc_hidden_size, template_hidden_size= tmp_hidden_size, att_type='general')
 
         self.max_seq_len = max_seq_len
         self.user_latent_dim = user_latent_dim
@@ -134,26 +150,35 @@ class VMT(nn.Module):
         encoder_output, latent = self.template_vae.encode(template, device=device)
         return encoder_output, latent
 
-    def decode(self, tmp_latent, desc_latent, user_feature, desc_outputs, max_length, device='cpu', temperature=None):
+    def decode(self, tmp_latent, desc_latent, user_feature, desc_outputs, tmp_outputs, max_length, device='cpu', temperature=1, gumbel=False):
         if self.gpu:
             device = 'cuda'
 
         latent = self.merge_proj(torch.cat([ tmp_latent, desc_latent, user_feature ], axis=1))
+        if self.biset != None:
+            desc_outputs = self.biset(desc_outputs, tmp_outputs)
+
+        if gumbel:
+            output_feat, output_logits, one_hot  = self.title_decoder(latent, desc_outputs, max_length, device=device, temperature=temperature, gumbel=True)
+            return output_feat, output_logits, one_hot
         output_feat, output_logits  = self.title_decoder(latent, desc_outputs, max_length, device=device, temperature=temperature)
         return output_feat, output_logits
 
 if __name__ == "__main__":
     import torch.nn.functional as F
-    inputs = torch.randint(0, 1800, (32, 128)).long()
-    user_feat = torch.randn((32, 128)).float()
-    vmt = VMT(128, 3200, 128,  tmp_latent_dim=89, desc_latent_dim=87,
-        max_seq_len=128, gpu=False)
+    inputs = torch.randint(0, 1800, (32, 32)).long().cuda()
+    user_feat = torch.randn((32, 32)).float().cuda()
+    vmt = VMT(128, 3200, 32,  tmp_latent_dim=10,desc_latent_dim=87,
+        user_latent_dim=32,
+        gpu=False, biset=True).cuda()
 
-    desc_outputs, desc_latent, mean, std = vmt.encode_desc(inputs, 'cpu')
+    desc_outputs, desc_latent, mean, std = vmt.encode_desc(inputs, 'cuda')
     print('description: ',desc_latent.shape)
+    outputs, tmp_latent = vmt.encode_tmp(inputs, 'cuda')
     print('template: ',tmp_latent.shape)
-    outputs, tmp_latent, mean, std = vmt.encode_tmp(inputs, 'cpu')
-    output_feat = vmt.decode(tmp_latent, desc_latent, user_feat, desc_outputs)
+
+    output_feat = vmt.decode(tmp_latent, desc_latent, user_feat, desc_outputs, outputs, 
+        max_length=32, device='cuda')
 
     nll_loss, kl_loss = vmt.cycle_template(inputs, inputs)
     print(desc_outputs.shape)

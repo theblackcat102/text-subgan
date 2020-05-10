@@ -96,15 +96,15 @@ if __name__ == "__main__":
     #         for t in tokens:
     #             word2freq[t] += 1
 
-    # word2idx = Constants.word2idx()
-    # # print(len(word2freq))
-    # for key, freq in word2freq.items():
-    #     word2idx[key] = len(word2idx)
-    # idx2word = Constants.idx2word()
-    # for token, idx in word2idx.items():
-    #     idx2word[idx] = token
+    word2idx = Constants.word2idx()
+    # print(len(word2freq))
+    for key, freq in word2freq.items():
+        word2idx[key] = len(word2idx)
+    idx2word = Constants.idx2word()
+    for token, idx in word2idx.items():
+        idx2word[idx] = token
 
-    # with open(os.path.join(CACHE_DIR, "word2idx.pkl"), 'wb') as f:
-    #     pickle.dump(word2idx, f)
-    # with open(os.path.join(CACHE_DIR, "idx2word.pkl"), 'wb') as f:
-    #     pickle.dump(idx2word, f)
+    with open(os.path.join(CACHE_DIR, "word2idx.pkl"), 'wb') as f:
+        pickle.dump(word2idx, f)
+    with open(os.path.join(CACHE_DIR, "idx2word.pkl"), 'wb') as f:
+        pickle.dump(idx2word, f)

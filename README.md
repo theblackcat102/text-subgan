@@ -35,6 +35,11 @@ python -W ignore -m cli.sub_relgan_trainer  --name relgan-gp-bin-loss-0.5-kmeans
 python -W ignore -m cli.sub_relgan_trainer  --name relgan-mini-kmeans --bin-weight -1 --pretrain-epochs 60 --iterations 200000 --max-seq-len 45 --batch-size 64 --pretrain-gen save/subspace_relgan_G_pretrained_20_word.pt
 ```
 
+```
+python -W ignore -m cli.sub_relgan_trainer  --name relgan-spectral --bin-weight -1 --pretrain-epochs 60 --iterations 200000 --max-seq-len 45 --batch-size 64 --pretrain-gen save/subspace_relgan_G_pretrained_20_word.pt
+```
+
+
 ## Server Logs:
 
 ```
