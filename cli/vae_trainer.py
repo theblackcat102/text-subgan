@@ -64,7 +64,7 @@ class TemplateTrainer():
         max_temp = 1.0
         temp_min = 0.00005
         temp = 1.0
-        self.gumbel_temp = temp
+        self.gumbel_temp = 0.0001
         N = args.iterations
         self.gumbel_anneal_rate = max_temp / N
 
@@ -386,8 +386,8 @@ class TemplateTrainer():
         with open(os.path.join(save_path, 'params.json'), 'w') as f:
             json.dump(vars(self.args), f)
         writer = SummaryWriter('logs/temp_{}-{}'.format(self.args.name, cur_time))
-        self.temp = args.temperature_min 
- 
+        # self.temp = args.temperature_min
+        self.temp = self.args.kl_weight 
 
         # self.pretrain(1, writer=writer)
 
@@ -414,8 +414,8 @@ class TemplateTrainer():
                     self.sample_results(writer, i)
                     self.model.train(), self.C.train()
 
-                self.temp = self.update_temp(i, args.iterations)
-                self.gumbel_temp = np.maximum(self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i), 0.00005)
+
+                self.gumbel_temp = np.maximum(self.args.gumbel_max - (self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i)), 0.00005)
 
                 if i % args.check_iter == 0:
                     torch.save({
@@ -472,6 +472,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--temperature-min', type=float, default=0.01)
     parser.add_argument('--temperature', type=float, default=1)
+    parser.add_argument('--gumbel-max', type=float, default=10)
 
     parser.add_argument('--anneal-rate', type=float, default=0.00002)
 
@@ -485,7 +486,7 @@ if __name__ == "__main__":
     parser.add_argument('--update-latent', type=str2bool, nargs='?',
                         default=True, help='Update latent assignment every epoch?')
 
-    parser.add_argument('--kl-weight', type=float, default=0.1)
+    parser.add_argument('--kl-weight', type=float, default=1.0)
     parser.add_argument('--opt-level', type=str, default='O1')
     parser.add_argument('--cycle-weight', type=float, default=0.2)
     parser.add_argument('--re-weight', type=float, default=0.5)

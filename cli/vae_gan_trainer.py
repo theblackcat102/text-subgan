@@ -66,7 +66,8 @@ class TemplateTrainer():
         temp = 1.0
         self.gumbel_temp = temp
         N = args.iterations
-        self.gumbel_anneal_rate = max_temp / N
+        self.gumbel_anneal_rate = 1 / N
+        self.temp_anneal = max_temp / N
         self.temp = args.temperature_min 
 
         # self.cluster_opt = optim.Adam(self.C.parameters(), lr=args.dis_lr)
@@ -433,6 +434,16 @@ class TemplateTrainer():
             tmp2 = tmp2.cuda()
         self.template2 = tmp2
 
+    def test(self):
+        i = 0
+        self.temp = np.maximum(self.temp * np.exp(-self.temp_anneal * i), 0.00005)
+        self.gumbel_temp = np.minimum(self.args.gumbel_max - (self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i)), 0.00005)
+        for i in range(100):
+            self.temp = np.maximum(self.temp * np.exp(-self.temp_anneal * i), 0.00005)
+            self.gumbel_temp = np.maximum(self.args.gumbel_max ** (self.gumbel_anneal_rate * i), 0.00005)
+
+            print(self.temp, self.gumbel_temp)
+
 
     def train(self):
 
@@ -461,6 +472,9 @@ class TemplateTrainer():
  
 
         # self.pretrain(1, writer=writer)
+        i = 0
+        self.temp = self.args.kl_weight
+        self.gumbel_temp = np.minimum(self.args.gumbel_max - (self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i)), 0.00005)
 
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
@@ -493,9 +507,8 @@ class TemplateTrainer():
                     self.model.eval(), self.C.eval()
                     self.sample_results(writer, i)
                     self.model.train(), self.C.train()
-                    self.gumbel_temp = np.maximum(self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i), 0.00005)
 
-                    self.temp = self.update_temp(i, args.iterations)
+                    self.gumbel_temp = np.maximum(self.args.gumbel_max ** (self.gumbel_anneal_rate * i), 0.00005)
 
 
                 if i % args.check_iter == 0:
@@ -557,6 +570,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--temperature-min', type=float, default=0.01)
     parser.add_argument('--temperature', type=float, default=1)
+    parser.add_argument('--gumbel-max', type=float, default=5)
 
     parser.add_argument('--anneal-rate', type=float, default=0.00002)
 
@@ -573,7 +587,7 @@ if __name__ == "__main__":
                         default=False, help='Use BiSET module to fuse article/template feature')
 
     parser.add_argument('--dis-weight', type=float, default=0.1)
-    parser.add_argument('--kl-weight', type=float, default=0.1)
+    parser.add_argument('--kl-weight', type=float, default=1.0)
     parser.add_argument('--opt-level', type=str, default='O1')
     parser.add_argument('--cycle-weight', type=float, default=0.2)
     parser.add_argument('--re-weight', type=float, default=0.5)
@@ -588,6 +602,7 @@ if __name__ == "__main__":
     # trainer.step(1)
     # trainer.dis_step(1)
     # trainer.calculate_bleu(None, size=1000)
+    # trainer.test()
     trainer.train()
     # trainer.pretrain(args.pretrain_epochs)
 
