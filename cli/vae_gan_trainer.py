@@ -51,8 +51,10 @@ class TemplateTrainer():
             tmp_latent_dim=args.tmp_latent_dim, desc_latent_dim=args.desc_latent_dim, user_latent_dim=args.user_latent_dim,
             biset=args.biset,
             max_seq_len=args.max_seq_len-1, gpu=True)
-        self.D = TemplateD(64, args.max_seq_len, 32, self.dataset2.vocab_size, args.tmp_latent_dim*args.tmp_cat_dim)
-        
+        output_latent = args.desc_latent_dim+(args.tmp_latent_dim*args.tmp_cat_dim)
+
+        self.D = TemplateD(64, args.max_seq_len, 32, self.dataset2.vocab_size, output_latent)
+
         self.C = VAE_Cluster(64, 64, k_bins=10, output_embed_dim=args.user_latent_dim)
 
         self.C.cuda()
@@ -152,21 +154,23 @@ class TemplateTrainer():
 
             desc1_outputs, desc1_latent, desc1_mean, desc1_std = self.model.encode_desc(src_inputs1)
             temp1_outputs, tmp1_latent = self.model.encode_tmp(tmp1)
+            real_latent = torch.cat([ tmp1_latent, desc1_latent ], axis=1)
             _, _, one_hots = self.model.decode(tmp1_latent, desc1_latent, user1_embed, 
                     desc1_outputs, temp1_outputs,
                     max_length=target1.shape[1], gumbel=True)
-
             temp1_outputs, tmp2_latent = self.model.encode_tmp(tmp2)
+            fake_latent = torch.cat([ tmp2_latent, desc1_latent ], axis=1)
+
             _, _, fake_hots = self.model.decode(tmp2_latent, desc1_latent, user1_embed, 
                     desc1_outputs, temp1_outputs,
                     max_length=target1.shape[1], gumbel=True)
 
         real_samples = F.one_hot(target1, self.args.vocab_size).float()
         real_logits, d_latent = self.D(real_samples)
-        mle_loss_real = self.mse_criterion(d_latent, tmp1_latent.detach())
+        mle_loss_real = self.mse_criterion(d_latent, real_latent.detach())
 
         fake_logits, d_latent = self.D(fake_hots)
-        mle_loss_fake = self.mse_criterion(d_latent, tmp2_latent.detach())
+        mle_loss_fake = self.mse_criterion(d_latent, fake_latent.detach())
 
         _, d_loss = get_losses(real_logits, fake_logits, loss_type='rsgan')
 
@@ -262,8 +266,10 @@ class TemplateTrainer():
         d_out_fake, fake_latent = self.D(output21_one_hot)
 
         g_loss, _ = get_losses(d_out_real, d_out_fake, self.args.loss_type)
-        mle_loss_real = self.mse_criterion(fake_latent, tmp1_latent.detach())
-        mle_loss_fake = self.mse_criterion(real_latent, tmp2_latent.detach())
+        real_latent_label = torch.cat([tmp1_latent, desc1_latent], axis=1)
+        fake_latent_label = torch.cat([tmp2_latent, desc1_latent], axis=1)
+        mle_loss_real = self.mse_criterion(fake_latent, real_latent_label.detach())
+        mle_loss_fake = self.mse_criterion(real_latent, fake_latent_label.detach())
 
         g_loss_ = g_loss + mle_loss_fake + mle_loss_real
 

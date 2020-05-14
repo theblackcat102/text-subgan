@@ -317,16 +317,16 @@ class KKDayUser(Dataset):
     def __len__(self):
         return self.size    
 
-def seq_collate(batch): # only use for word index
+def seq_collate(batch, tgt_upper_max_len=64): # only use for word index
     src_sequences = []
     tmp_sequences = []
     tgt_sequences = []
 
     if 'length' in batch[0]:
-        tgt_max_length = max([d['length'] for d in batch ])
+        tgt_max_length = max(max([d['length'] for d in batch ], tgt_upper_max_len))
         src_max_length = max([d['length'] for d in batch ])
     else:
-        tgt_max_length = max([d['description_length'] for d in batch ])
+        tgt_max_length = max(max([d['description_length'] for d in batch ]), tgt_upper_max_len)
         src_max_length = max([d['title_length'] for d in batch ])
         tmp_max_length = max([d['template_length'] for d in batch ])
 
