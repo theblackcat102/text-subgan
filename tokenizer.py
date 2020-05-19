@@ -54,7 +54,27 @@ class WordTokenizer():
 
     def split(self, sentence):
         return sentence.split(' ')
-    
+
+    def encode(self, text):
+        def encode_( sent):
+            text = self.split(sent)
+            encoded = []
+            for c in text:
+                if c in self.word2idx:
+                    encoded.append(self.word2idx[c])
+                else:
+                    encoded.append(self.word2idx[Constants.UNK_WORD])
+            encoded = np.asarray(encoded)
+            return encoded
+
+        if isinstance(text, str):
+            return encode_(text)
+        else:
+            sentences = []
+            for sent in text:
+                sentences.append(encode_(sent))
+            return np.array(sentences)
+
 
 class CharTokenizer():
 
@@ -96,3 +116,23 @@ class CharTokenizer():
     def split(self, sentence):
         return list(sentence.replace(' ', ''))
 
+
+    def encode(self, text):
+        def encode_(self, sent):
+            text = self.split(sent)
+            encoded = []
+            for c in text:
+                if c in self.word2idx:
+                    encoded.append(self.word2idx[c])
+                else:
+                    encoded.append(self.word2idx[Constants.UNK_WORD])
+            encoded = np.asarray(encoded)
+            return encoded
+
+        if isinstance(text, str):
+            return encode_(text)
+        else:
+            sentences = []
+            for sent in text:
+                sentences.append(encode_(sent))
+            return np.array(sentences)

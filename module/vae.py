@@ -123,7 +123,11 @@ class VariationalDecoder(nn.Module):
             inputs = self.embedding(next_tokens)
 
         outputs = torch.cat(outputs, dim=1)
-        inp = torch.stack(inp).squeeze(-1).transpose(0,1)
+        if torch.stack(inp).shape[-1] <= 1:
+            inp = torch.stack(inp).transpose(0,1)
+        else:
+            inp = torch.stack(inp).squeeze(-1).transpose(0,1)
+
         if gumbel:
             return outputs, inp, all_preds
 
