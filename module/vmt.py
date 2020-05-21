@@ -104,7 +104,7 @@ class VMT(nn.Module):
 
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
 
-        self.template_vae = VAE_Gumbel(self.embedding, embedding_dim=embedding_dim, 
+        self.template_vae = VAE_Gumbel(nn.Embedding(vocab_size, embedding_dim), embedding_dim=embedding_dim, 
             enc_hidden=tmp_hidden_size, categorical_dim=tmp_category, dec_hidden=tmp_dec_hidden_size, 
             latent_dim=tmp_latent_dim)
 

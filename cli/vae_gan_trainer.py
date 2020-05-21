@@ -20,6 +20,7 @@ from utils import gradient_penalty, str2bool, chunks
 from nltk.translate.bleu_score import sentence_bleu
 from nltk.translate.bleu_score import SmoothingFunction
 from shutil import copyfile
+import pickle
 
 
 def data_iter(dataloader):
@@ -96,36 +97,108 @@ class TemplateTrainer():
         self.init_sample_inputs()
 
     def pretrain(self, epochs, writer=None):
+        from dataset import KKDayUser, seq_collate
+        dataset = KKDayUser(-1, 'data/kkday_dataset/user_data', 
+            'data/kkday_dataset/matrix_factorized_64.pkl',
+            prefix='item_graph', embedding=None, max_length=128, 
+            token_level='word', is_train=True)
+        val_dataset = KKDayUser(-1, 'data/kkday_dataset/user_data', 
+            'data/kkday_dataset/matrix_factorized_64.pkl',
+            prefix='item_graph', embedding=None, max_length=128, 
+            token_level='word', is_train=False)
+
+
+        vae = self.model.template_vae
+        class Model(nn.Module):
+            def __init__(self):
+                super(Model, self).__init__()
+                self.vae = vae
+
+        model = Model().cuda()
+        pretrain_dataloader = torch.utils.data.DataLoader(dataset, num_workers=6,
+                            collate_fn=seq_collate, batch_size=32, shuffle=True, drop_last=True)
+        val_dataloader = torch.utils.data.DataLoader(val_dataset, num_workers=6,
+                            collate_fn=seq_collate, batch_size=56, shuffle=True, drop_last=True)
+
+        optimizer = optim.Adam(model.parameters(), lr=0.0001, betas=(0.5, 0.999))
+        nll_criterion = nn.NLLLoss(ignore_index=Constants.PAD)
+
         iter_ = 0
-        pretrain_dataloader = torch.utils.data.DataLoader(self.dataset2, num_workers=6,
-                        collate_fn=seq_collate, batch_size=args.pre_batch_size, shuffle=True, drop_last=True)
-        for epoch in range(epochs):
-            print('Epoch '+ str(epoch))
-            with tqdm(total=len(pretrain_dataloader), dynamic_ncols=True) as pbar:
-                for batch in pretrain_dataloader:
-                    src_inputs = batch['src']
-                    tmp = batch['tmp']
-                    items, users = batch['items'], batch['users']
-                    inputs, target = batch['tmp'][:, :-1], batch['tmp'][:, 1:]
+        max_temp = 1.0
+        temp_min = 0.00005
+        temp = 1.0
+        N = len(pretrain_dataloader) * 10
+        anneal_rate = max_temp / N
 
-                    if cfg.CUDA:
-                        inputs, items, users = inputs.cuda(), items.cuda(), users.cuda()
-                        src_inputs = src_inputs.cuda()
-                        inputs = inputs.cuda()
-                        target = target.cuda()
-                        tmp = tmp.cuda()
+        for e in range(epochs):
+            for batch in pretrain_dataloader:
+                inputs, target = batch['tmp'][:, :-1], batch['tmp'][:, 1:]
+                title = batch['tgt'][:, :-1]
+                title = title.cuda()
+                inputs = inputs.cuda()
+                target = target.cuda()
+                decoder_output, latent, inp = model.vae(inputs, max_length=inputs.shape[1], temperature=temp)
 
-                    nll_loss, kl_loss = self.model.cycle_template(inputs, target)
-                    loss = nll_loss+kl_loss
-                    self.gen_opt.zero_grad()
-                    loss.backward()
-                    self.gen_opt.step()
-                    iter_ += 1
-                    pbar.update(1)
-                    pbar.set_description('loss: {:.4f}'.format(loss.item()))
 
-                    if writer:
-                        writer.add_scalar('pretrain/loss', loss.item(), iter_)
+                nll_loss = nll_criterion(decoder_output.view(-1, dataset.vocab_size),
+                    target.flatten())
+
+                if iter_ % 100 == 1:
+                    temp = np.maximum(temp * np.exp(-anneal_rate * iter_), temp_min)
+
+                log_ratio = torch.log(latent * args.tmp_cat_dim + 1e-20)
+                kl_loss = torch.sum(latent * log_ratio, dim=-1).mean()
+                optimizer.zero_grad()
+                loss = kl_loss + nll_loss
+                loss.backward()
+                optimizer.step()
+
+                decoder_output, latent, inp = model.vae(title, max_length=title.shape[1], temperature=temp)
+                nll_loss = nll_criterion(decoder_output.view(-1, dataset.vocab_size),
+                    target.flatten())
+                if iter_ % 100 == 1:
+                    temp = np.maximum(temp * np.exp(-anneal_rate * iter_), temp_min)
+                log_ratio = torch.log(latent * args.tmp_cat_dim + 1e-20)
+                kl_loss = torch.sum(latent * log_ratio, dim=-1).mean()
+                optimizer.zero_grad()
+                loss = kl_loss + nll_loss
+                loss.backward()
+                optimizer.step()
+
+                if iter_ % 100 == 0:
+                    print('loss: {:.4f}'.format(loss.item()))
+
+
+                if iter_ % 1000 == 0 and iter_ != 0:
+                    model.eval()
+                    with torch.no_grad():
+                        print('sample latent')
+                        clusters = {}
+                        for batch in val_dataloader:
+                            inputs, target = batch['tmp'][:, :-1], batch['tmp'][:, 1:]
+                            inputs = inputs.cuda()
+                            target = target.cuda()
+                            decoder_output, latents, inp = model.vae(inputs, max_length=inputs.shape[1], temperature=temp)
+                            for idx, sent in enumerate(batch['tmp'][:, 1:]):
+                                sentence = []
+                                for token in sent:
+                                    if token.item() == Constants.EOS:
+                                        break
+                                    sentence.append( dataset.idx2word[token.item()])
+                                sent = ' '.join(sentence)
+                                latent = latents[idx].cpu().detach().numpy()
+
+                                clusters[sent] = latent
+                    model.train()
+                
+                iter_ += 1
+
+        self.model.template_vae.load_state_dict(model.vae.state_dict())
+        for params in self.model.template_vae.parameters():
+            params.requires_grad = False
+
+        torch.save(self.model, 'save/pretrain_vmt.pt')
+
 
     def dis_step(self, i):
         batch1 = next(self.data_iterator1)
@@ -167,10 +240,15 @@ class TemplateTrainer():
 
         real_samples = F.one_hot(target1, self.args.vocab_size).float()
         real_logits, d_latent = self.D(real_samples)
-        mle_loss_real = self.mse_criterion(d_latent, real_latent.detach())
+        latent_dim = tmp2_latent.shape[1]
+        
+        mle_loss_real = self.mse_criterion(d_latent[ :, :latent_dim ], real_latent[ :, :latent_dim ].detach()) *2.0 +\
+                self.mse_criterion(d_latent[ :, latent_dim: ], real_latent[:, latent_dim: ].detach()) * 0.5
 
         fake_logits, d_latent = self.D(fake_hots)
-        mle_loss_fake = self.mse_criterion(d_latent, fake_latent.detach())
+
+        mle_loss_fake = self.mse_criterion(d_latent[ :, :latent_dim ], fake_latent[ :, :latent_dim ].detach()) *2.0 + \
+                self.mse_criterion(d_latent[ :, latent_dim: ], fake_latent[:, latent_dim: ].detach()) * 0.5
 
         _, d_loss = get_losses(real_logits, fake_logits, loss_type='rsgan')
 
@@ -219,17 +297,17 @@ class TemplateTrainer():
         _, user1_embed = self.C(items1, users1)
         _, user2_embed = self.C(items2, users2)
 
-        nll_loss1, kl_loss1 = self.model.cycle_template(tmp1[:, :-1], tmp1[:, 1:], temperature=self.gumbel_temp)
-        nll_loss2, kl_loss2 = self.model.cycle_template(tmp2[:, :-1], tmp2[:, 1:], temperature=self.gumbel_temp)
+        # nll_loss1, kl_loss1 = self.model.cycle_template(tmp1[:, :-1], tmp1[:, 1:], temperature=self.gumbel_temp)
+        # nll_loss2, kl_loss2 = self.model.cycle_template(tmp2[:, :-1], tmp2[:, 1:], temperature=self.gumbel_temp)
 
-        cycle_nll = (nll_loss1+nll_loss2)/2
-        cycle_kl = (kl_loss1+kl_loss2)/2
+        # cycle_nll = (nll_loss1+nll_loss2)/2
+        # cycle_kl = (kl_loss1+kl_loss2)/2
 
-        nll_loss1, kl_loss1 = self.model.cycle_template(inputs1, tmp1[:, 1:], temperature=self.gumbel_temp)
-        nll_loss2, kl_loss2 = self.model.cycle_template(inputs2, tmp2[:, 1:], temperature=self.gumbel_temp)
+        # nll_loss1, kl_loss1 = self.model.cycle_template(inputs1, tmp1[:, 1:], temperature=self.gumbel_temp)
+        # nll_loss2, kl_loss2 = self.model.cycle_template(inputs2, tmp2[:, 1:], temperature=self.gumbel_temp)
         
-        title_cycle_nll = (nll_loss1+nll_loss2)/2
-        title_cycle_kl = (kl_loss1+kl_loss2)/2
+        # title_cycle_nll = (nll_loss1+nll_loss2)/2
+        # title_cycle_kl = (kl_loss1+kl_loss2)/2
 
         desc1_outputs, desc1_latent, desc1_mean, desc1_std = self.model.encode_desc(src_inputs1)
         tmp1_outputs, tmp1_latent = self.model.encode_tmp(tmp1)
@@ -251,10 +329,10 @@ class TemplateTrainer():
 
         reconstruct_loss = (construct1_loss+construct2_loss)/2
 
-        total_kl_loss = desc_kl_loss + cycle_kl
-        cycle_nll_loss = cycle_nll
+        total_kl_loss = desc_kl_loss# + cycle_kl
+        # cycle_nll_loss = cycle_nll
 
-        title_loss = (title_cycle_kl* self.temp + title_cycle_nll)
+        # title_loss = (title_cycle_kl* self.temp + title_cycle_nll)
 
         real_samples = F.one_hot(target1, self.args.vocab_size).float()
         d_out_real, real_latent = self.D(real_samples)
@@ -268,13 +346,24 @@ class TemplateTrainer():
         g_loss, _ = get_losses(d_out_real, d_out_fake, self.args.loss_type)
         real_latent_label = torch.cat([tmp1_latent, desc1_latent], axis=1)
         fake_latent_label = torch.cat([tmp2_latent, desc1_latent], axis=1)
-        mle_loss_real = self.mse_criterion(fake_latent, real_latent_label.detach())
-        mle_loss_fake = self.mse_criterion(real_latent, fake_latent_label.detach())
+        latent_dim = tmp2_latent.shape[1]
+
+        mle_loss_real = self.mse_criterion(fake_latent[ :, :latent_dim ], real_latent_label[ :, :latent_dim ].detach()) *2.0 + \
+                self.mse_criterion(fake_latent[ :, latent_dim: ], real_latent_label[:, latent_dim: ].detach()) * 0.5
+
+        # mle_loss_real = self.mse_criterion(fake_latent, real_latent_label.detach())
+        # mle_loss_fake = self.mse_criterion(real_latent, fake_latent_label.detach())
+
+        mle_loss_fake = self.mse_criterion(real_latent[ :, :latent_dim ], fake_latent_label[ :, :latent_dim ].detach()) *2.0 + \
+                self.mse_criterion(real_latent[ :, latent_dim: ], fake_latent_label[:, latent_dim: ].detach()) * 0.5
+
 
         g_loss_ = g_loss + mle_loss_fake + mle_loss_real
 
         total_loss = reconstruct_loss*self.args.re_weight + \
-                cycle_nll_loss*self.args.cycle_weight + total_kl_loss* self.temp + title_loss + \
+                # cycle_nll_loss*self.args.cycle_weight +\
+                total_kl_loss* self.temp + \ 
+                # title_loss + \
                 g_loss_ * self.args.dis_weight
         
 
@@ -290,7 +379,7 @@ class TemplateTrainer():
 
         self.D.train()
 
-        return total_loss.item(), total_kl_loss.item(), reconstruct_loss.item(), cycle_nll_loss.item(), title_cycle_nll.item(), cycle_nll.item(), g_loss_.item()
+        return total_loss.item(), total_kl_loss.item(), reconstruct_loss.item(), 0, 0, cycle_nll.item(), g_loss_.item()
 
     def sample_results(self, writer, step=0):
         sample_size = 5
@@ -465,6 +554,10 @@ class TemplateTrainer():
             self.model.embedding.cuda()
             self.model.title_decoder.decoder.outputs2vocab.weight.data.copy_(self.model.embedding.weight.data)
 
+        self.model.template_vae.load_state_dict( torch.load('save/pretrain_vmt.pt').template_vae.state_dict() )
+        for params in self.model.template_vae.parameters():
+            params.requires_grad = False
+
         from datetime import datetime
         cur_time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
         save_path = 'save/temp_{}-{}'.format(self.args.name, cur_time)
@@ -604,6 +697,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     trainer = TemplateTrainer(args)
+    # trainer.pretrain(5)
     # trainer.sample_results(None)
     # trainer.step(1)
     # trainer.dis_step(1)
