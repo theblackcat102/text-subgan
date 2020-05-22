@@ -9,11 +9,23 @@ from module.discriminator import CNNDiscriminator
 from module.biset import BiSET
 
 dis_filter_sizes = [2, 3, 4, 5]
-dis_num_filters = [64, 64, 64, 64]
+dis_num_filters = [64, 64, 64, 32]
 
+class QHead(nn.Module):
+    def __init__(self, dis_latent, category_dim,latent_dim):
+        super(QHead, self).__init__()
+        self.feature_dim = dis_latent
+        self.feature2mean = nn.Linear(self.feature_dim, latent_dim)
+        self.feature2var = nn.Linear(self.feature_dim, latent_dim)
+        self.feature2cat = nn.Linear(self.feature_dim, category_dim)
+
+    def forward(self, latent):
+        mean_, vars_ = self.feature2mean(latent), self.feature2var(latent), 
+        cat = self.feature2cat(latent)
+        return mean_, vars_, cat
 
 class TemplateD(CNNDiscriminator):
-    def __init__(self, embed_dim, max_seq_len, num_rep, vocab_size, latent_dim,  padding_idx=Constants.PAD, gpu=False, dropout=0.25):
+    def __init__(self, embed_dim, max_seq_len, num_rep, vocab_size, category_dim,  padding_idx=Constants.PAD, gpu=False, dropout=0.25):
         super(TemplateD, self).__init__(embed_dim, vocab_size, dis_filter_sizes, dis_num_filters, padding_idx,
                                        gpu, dropout)
 
@@ -30,8 +42,6 @@ class TemplateD(CNNDiscriminator):
             zip(dis_num_filters, dis_filter_sizes)
         ])
         self.highway = nn.Linear(self.feature_dim, self.feature_dim)
-        self.feature2out = nn.Linear(self.feature_dim, latent_dim)
-        self.latent_dim = latent_dim
         self.out2logits = nn.Linear(self.feature_dim, 1)
         self.dropout = nn.Dropout(dropout)
         self.init_params()
@@ -54,9 +64,8 @@ class TemplateD(CNNDiscriminator):
         logits = self.out2logits(pred)
 
         latent = torch.sum(pred.view(-1, self.num_rep, self.feature_dim), dim=1)
-        pred = self.feature2out(self.dropout(latent))
 
-        return logits, pred
+        return logits, latent
 
 class VariationalAutoEncoder(nn.Module):
     '''
