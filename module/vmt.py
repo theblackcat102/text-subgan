@@ -15,9 +15,14 @@ class QHead(nn.Module):
     def __init__(self, dis_latent, category_dim,latent_dim):
         super(QHead, self).__init__()
         self.feature_dim = dis_latent
-        self.feature2mean = nn.Linear(self.feature_dim, latent_dim)
-        self.feature2var = nn.Linear(self.feature_dim, latent_dim)
-        self.feature2cat = nn.Linear(self.feature_dim, category_dim)
+        self.encode = nn.Sequential(
+            nn.Linear(self.feature_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+        )
+        self.feature2mean = nn.Linear(128, latent_dim)
+        self.feature2var = nn.Linear(128, latent_dim)
+        self.feature2cat = nn.Linear(128, category_dim)
 
     def forward(self, latent):
         mean_, vars_ = self.feature2mean(latent), self.feature2var(latent), 
@@ -28,7 +33,12 @@ class ProductHead(nn.Module):
     def __init__(self, dis_latent, latent_dim):
         super(ProductHead, self).__init__()
         self.feature_dim = dis_latent
-        self.feature2latent = nn.Linear(self.feature_dim, latent_dim)
+        self.feature2latent = nn.Sequential(
+            nn.Linear(self.feature_dim, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, latent_dim)
+        )
 
     def forward(self, latent):
         return self.feature2latent(latent)
