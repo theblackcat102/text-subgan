@@ -4,11 +4,12 @@ import glob
 import pickle
 from tqdm import tqdm
 import torch
+import random
 from torch.utils.data import Dataset
 from collections import defaultdict
 from preprocess import clean_text, segment_text, pad_sequence
 from constant import (
-    CACHE_DIR, DCARD_DATA, PTT_DATA, DCARD_WHITE_LIST, PTT_WHITE_LIST,
+    CACHE_DIR, 
     MAX_LENGTH, Constants)
 from tokenizer import CharTokenizer, WordTokenizer
 
@@ -78,7 +79,6 @@ class TextDataset(Dataset):
 
     def __len__(self):
         return self.size
-
 
 class TextSubspaceDataset(Dataset):
     def __init__(self, chunk_size, filename, prefix, embedding, max_length, k_bins=5,force_fix_len=False, token_level='word'):
@@ -175,8 +175,6 @@ class TextSubspaceDataset(Dataset):
     def __len__(self):
         return self.size
 
-
-
 class KKDayUser(Dataset):
     def __init__(self, chunk_size, datapath, graph_embedding, 
         prefix, embedding, max_length, is_train=True,force_fix_len=False, token_level='word'):
@@ -204,6 +202,9 @@ class KKDayUser(Dataset):
                 open(os.path.join(CACHE_DIR, cache_data_name), 'rb'))
             self.data = cache['data']
             self.prod2id = cache['prod2id']
+            self.user2id = cache['user2id']
+            self.users_pid = cache['users_pid']
+
         else:
             self.data = []
             self.user2id = {}
@@ -223,9 +224,16 @@ class KKDayUser(Dataset):
             data = self.encode_text(template_files, data, 'template')
 
             products, users = [], []
+            users_pid = {}
             with open('data/kkday_dataset/user_data/useritem_relations.txt', 'r') as f:
                 for line in tqdm(f.readlines()):
                     user_id, prod_id = line.strip().split('\t')
+                    if user_id not in users_pid:
+                        users_pid[user_id] = []
+
+                    if prod_id not in users_pid[user_id]:
+                        users_pid[user_id].append(prod_id)
+
                     if user_id in name2id and prod_id in name2id and prod_id in data and len(data[prod_id]) > 1 \
                         and len(data[prod_id]['title']) > 0:
                         products.append(prod_id)
@@ -247,8 +255,13 @@ class KKDayUser(Dataset):
 
             print(f'Unique {len(self.user2id)}, {len(self.prod2id)}')
 
+            random.shuffle(self.data)
+
             with open(os.path.join(CACHE_DIR, cache_data_name), 'wb') as f:
-                pickle.dump({'data': self.data, 'user2id': self.user2id, 'prod2id': self.prod2id}, f)
+                pickle.dump({'data': self.data, 'user2id': self.user2id, 
+                    'prod2id': self.prod2id, 
+                    'users_pid': users_pid}, f)
+            self.users_pid = users_pid
 
         # print(len(self.data))
         flag = int(len(self.data)*0.8)
@@ -258,6 +271,8 @@ class KKDayUser(Dataset):
             self.data = self.data[flag:]
 
         self.size = len(self.data)
+
+        self.product_lists = list(self.prod2id)
 
 
     def __getitem__(self, item):
@@ -276,20 +291,29 @@ class KKDayUser(Dataset):
             return seq, length
 
         item_id = row['prod']
+
+        neg_id = random.sample(self.product_lists, 1)[0]
         user_id = row['user']
+        while neg_id in self.users_pid[user_id]:
+            neg_id = random.sample(self.product_lists, 1)[0]
+
         item_embedding = self.graph_embedding['embedding'][self.graph_embedding['name2id'][item_id]]
         user_embedding = self.graph_embedding['embedding'][self.graph_embedding['name2id'][user_id]]
+        neg_embedding = self.graph_embedding['embedding'][self.graph_embedding['name2id'][neg_id]]
 
         title_seq, title_length = encode_seq(row['title'])
         description_seq, description_length = encode_seq(row['description'])
         template_seq, template_length = encode_seq(row['template'])
 
         return {
-            'item': item_embedding, 'user': user_embedding,
+            'item': item_embedding, 'user': user_embedding, 'neg': neg_embedding,
             'title_seq': title_seq, 'title_length': title_length, 
             'description_seq': description_seq, 'description_length': description_length, 
             'template_seq': template_seq, 'template_length': template_length,
-            'id': self.prod2id[item_id]}
+            'pid': self.prod2id[item_id],
+            'uid': self.user2id[user_id], 
+            'nid': self.prod2id[neg_id],
+        }
 
 
     def encode_text(self, filenames, data, field):
@@ -314,8 +338,20 @@ class KKDayUser(Dataset):
                     data[item_id][field] = encoded
         return data      
 
+    def prep_embedding(self):
+        user_embeddings = np.zeros( (len(self.user2id), len(self.graph_embedding['embedding'][0]) ))
+        for userid, id_ in self.user2id.items():
+            user_embeddings[id_] = self.graph_embedding['embedding'][self.graph_embedding['name2id'][userid]]
+
+        prod_embeddings = np.zeros((len(self.prod2id), len(self.graph_embedding['embedding'][0])))
+        for prodid, id_ in self.prod2id.items():
+            prod_embeddings[id_] = self.graph_embedding['embedding'][self.graph_embedding['name2id'][prodid]]
+
+        return user_embeddings, prod_embeddings
+
     def __len__(self):
-        return self.size    
+        return self.size
+
 
 def seq_collate(batch, tgt_upper_max_len=64): # only use for word index
     src_sequences = []
@@ -330,8 +366,8 @@ def seq_collate(batch, tgt_upper_max_len=64): # only use for word index
         src_max_length = max([d['title_length'] for d in batch ])
         tmp_max_length = max([d['template_length'] for d in batch ])
 
-    latents, bins, users, items, item_ids = [], [], [], [], []
-
+    latents, bins, users, items, item_ids, user_ids, neg_ids = [], [], [], [], [], [], []
+    negs = []
     for data in batch:
         if 'bins' in data:
             bins.append(data['bins'])
@@ -339,7 +375,10 @@ def seq_collate(batch, tgt_upper_max_len=64): # only use for word index
         if 'item' in data:
             items.append(data['item'])
             users.append(data['user'])
-            item_ids.append(data['id'])
+            negs.append(data['neg'])
+            item_ids.append(data['pid'])
+            user_ids.append(data['uid'])
+            neg_ids.append(data['nid'])
         if 'seq' in data:
             src_sequences.append(pad_sequence(data['seq'], src_max_length))
         else:
@@ -375,10 +414,18 @@ def seq_collate(batch, tgt_upper_max_len=64): # only use for word index
         # users = torch.from_numpy(np.array(users)).float()
         items = torch.from_numpy(np.array(items)).float()
         data['items'] = items
+        negs = torch.from_numpy(np.array(negs)).float()
+        data['negs'] = negs
+
         users = torch.from_numpy(np.array(users)).float()
         data['users'] = users
         item_ids = torch.from_numpy(np.array(item_ids)).long()
         data['item_ids'] = item_ids
+
+        user_ids = torch.from_numpy(np.array(user_ids)).long()
+        data['user_ids'] = user_ids
+        neg_ids = torch.from_numpy(np.array(neg_ids)).long()
+        data['neg_ids'] = neg_ids
 
         # data['users'] = users
 
@@ -417,8 +464,9 @@ if __name__ == "__main__":
     # dataset = TextDataset(-1, 'data/kkday_dataset/test_article.txt', prefix='test_article', embedding=None, max_length=256)
     # print(dataset.vocab_size)
     print(len(dataset))
+    dataset.prep_embedding()
     dataloader = torch.utils.data.DataLoader(dataset, 
-        collate_fn=seq_collate, batch_size=32)
+        collate_fn=seq_collate, batch_size=32, num_workers=0)
     # dataset.calculate_stats()
     from tqdm import tqdm
     for batch in tqdm(dataloader):

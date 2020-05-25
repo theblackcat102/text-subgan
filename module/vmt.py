@@ -24,8 +24,19 @@ class QHead(nn.Module):
         cat = self.feature2cat(latent)
         return mean_, vars_, cat
 
+class ProductHead(nn.Module):
+    def __init__(self, dis_latent, latent_dim):
+        super(ProductHead, self).__init__()
+        self.feature_dim = dis_latent
+        self.feature2latent = nn.Linear(self.feature_dim, latent_dim)
+
+    def forward(self, latent):
+        return self.feature2latent(latent)
+
+
 class TemplateD(CNNDiscriminator):
-    def __init__(self, embed_dim, max_seq_len, num_rep, vocab_size, category_dim,  padding_idx=Constants.PAD, gpu=False, dropout=0.25):
+    def __init__(self, embed_dim, max_seq_len, num_rep, vocab_size, category_dim,  padding_idx=Constants.PAD, 
+        to_latent=False, gpu=False, dropout=0.25):
         super(TemplateD, self).__init__(embed_dim, vocab_size, dis_filter_sizes, dis_num_filters, padding_idx,
                                        gpu, dropout)
 
@@ -45,6 +56,10 @@ class TemplateD(CNNDiscriminator):
         self.out2logits = nn.Linear(self.feature_dim, 1)
         self.dropout = nn.Dropout(dropout)
         self.init_params()
+        self.to_latent = to_latent
+
+        if to_latent:
+            self.proj = nn.Linear(self.feature_dim, category_dim)
 
     def forward(self, inp):
         """
@@ -64,7 +79,8 @@ class TemplateD(CNNDiscriminator):
         logits = self.out2logits(pred)
 
         latent = torch.sum(pred.view(-1, self.num_rep, self.feature_dim), dim=1)
-
+        if self.to_latent:
+            latent = self.proj(latent)
         return logits, latent
 
 class VariationalAutoEncoder(nn.Module):

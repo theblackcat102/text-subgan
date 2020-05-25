@@ -17,22 +17,6 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 MAX_LENGTH = 50
 
-PTT_DATA = './data/批踢踢實業坊_title_only/*.txt'
-PTT_WHITE_LIST = [
-    '批踢踢實業坊_MakeUp_板.txt',
-    '批踢踢實業坊_Boy-Girl_板.txt',
-    '批踢踢實業坊_Gossiping_板.txt',
-    '批踢踢實業坊_StupidClown_板.txt',
-]
-
-DCARD_DATA = './data/Dcard_title_only/*.txt'
-DCARD_WHITE_LIST = [
-    'makeup.txt',
-    'mood.txt',
-    'talk.txt',
-    'funny.txt',
-    'relationship.txt',
-]
 
 EMOJI_PATTERN = re.compile(
     u"["
