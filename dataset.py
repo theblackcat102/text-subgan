@@ -336,7 +336,7 @@ class KKDayUser(Dataset):
 
                     encoded = np.asarray(encoded)
                     data[item_id][field] = encoded
-        return data      
+        return data
 
     def prep_embedding(self):
         user_embeddings = np.zeros( (len(self.user2id), len(self.graph_embedding['embedding'][0]) ))
@@ -352,6 +352,109 @@ class KKDayUser(Dataset):
     def __len__(self):
         return self.size
 
+class TemPest(Dataset):
+    def __init__(self, cache_path, data_type,
+        max_length=-1, is_train=True,force_fix_len=False, token_level='word'):
+        self.max_length = max_length
+        assert data_type in ['train', 'valid', 'test']
+        self.data_pt = torch.load(os.path.join(cache_path, data_type+'.pt'))
+        self.max_length = max_length
+        if token_level == 'word':
+            tokenizer = WordTokenizer(postfix='tempest_word')
+        else:
+            tokenizer = CharTokenizer(postfix='tempest_word')
+        self.tokenizer = tokenizer
+        self.vocab_size = len(tokenizer.word2idx)
+        
+
+    def encode_seq(seq):
+        if self.force_fix_len:
+            length = self.max_length
+        else:
+            length = len(seq)
+
+        if self.embedding:
+            embedding_seq = np.zeros((len(seq), self.vocab_size))
+            embedding_seq[np.arange(len(seq)), seq] = 1.0
+            seq = embedding_seq
+        return seq, length
+
+    def __getitem__(self, item):
+        '''
+            This returns 
+            target, article text( source ), template, user, product pair
+            ext vocab source
+        '''
+        data = self.data_pt[item]
+        src = self.tokenizer.encode(data[0])
+        tgt = self.tokenizer.encode(data[1])
+        tmt = self.tokenizer.encode(data[2])
+        user_prod = data[3]
+
+        return {
+            'src': src,
+            'tgt': tgt,
+            'tmt': tmt,
+            'user_prod': user_prod,
+            'src_length': len(src), 
+            'tgt_length': len(tgt),             
+            'tmt_length': len(tmt), 
+        }
+
+
+    def __len__(self):
+        return len(self.data_pt)
+
+def tempest_collate(batch, tgt_upper_max_len=40):
+    src_sequences = []
+    tmp_sequences = []
+    tgt_sequences = []
+    tgt_max_length = max(max([d['tgt_length'] for d in batch ]), tgt_upper_max_len)
+    src_max_length = max([d['src_length'] for d in batch ])
+    tmp_max_length = max([d['tmt_length'] for d in batch ])
+
+    user_prods = []
+    users = []
+    prods = []
+    for data in batch:
+        if len(data['user_prod']) > 0:
+            idx = random.randint(0, len(data['user_prod'])-1)
+            while min(data['user_prod'][idx]) < 0:
+                idx = random.randint(0, len(data['user_prod'])-1)
+
+            prods.append(data['user_prod'][idx][0])
+            users.append(data['user_prod'][idx][1])
+        else:
+            users.append(-1)
+            prods.append(-1)
+        # add eos, bos here
+        tmp_sequences.append(pad_sequence(data['tmt'], tmp_max_length))
+        tgt_sequences.append(pad_sequence(data['tgt'], tgt_max_length))
+        src_sequences.append(pad_sequence(data['src'], src_max_length))
+
+    # user_prods = np.concatenate(user_prods, axis=0)
+    # user_prods = torch.from_numpy(user_prods).long()
+
+    users = torch.from_numpy(np.array(users)).long()
+    prods = torch.from_numpy(np.array(prods)).long()
+
+    src_sequences = np.stack(src_sequences)
+    src_sequences = torch.from_numpy(src_sequences).long()
+
+    tgt_sequences = np.stack(tgt_sequences)
+    tgt_sequences = torch.from_numpy(tgt_sequences).long()
+
+    tmp_sequences = np.stack(tmp_sequences)
+    tmp_sequences = torch.from_numpy(tmp_sequences).long()
+
+    return {
+        'users': users,
+        'prods': prods,
+        'src': src_sequences,
+        'tgt': tgt_sequences,
+        'tmt': tmp_sequences,
+        # 'user_prods': user_prods,
+    }
 
 def seq_collate(batch, tgt_upper_max_len=64): # only use for word index
     src_sequences = []
@@ -426,9 +529,7 @@ def seq_collate(batch, tgt_upper_max_len=64): # only use for word index
         data['user_ids'] = user_ids
         neg_ids = torch.from_numpy(np.array(neg_ids)).long()
         data['neg_ids'] = neg_ids
-
         # data['users'] = users
-
     return data
 
 
@@ -463,13 +564,32 @@ if __name__ == "__main__":
     # dataset = TextDataset(-1, 'data/kkday_dataset/test_title.txt', prefix='test_title', embedding=None, max_length=128)
     # dataset = TextDataset(-1, 'data/kkday_dataset/test_article.txt', prefix='test_article', embedding=None, max_length=256)
     # print(dataset.vocab_size)
+    # print(len(dataset))
+    # dataset.prep_embedding()
+    # dataloader = torch.utils.data.DataLoader(dataset, 
+    #     collate_fn=seq_collate, batch_size=89, num_workers=0)
+    # # dataset.calculate_stats()
+    # from tqdm import tqdm
+
+    # for batch in tqdm(dataloader):
+    #     batch['items'].shape
+    #     # print(len(batch['src']))
+    # # convert_bipartile()
+
+    # dataset = TemPest('dataset/', 'train')
+    # print(len(dataset))
+
+    dataset = TemPest('dataset/', 'valid')
     print(len(dataset))
-    dataset.prep_embedding()
+
     dataloader = torch.utils.data.DataLoader(dataset, 
-        collate_fn=seq_collate, batch_size=32, num_workers=0)
-    # dataset.calculate_stats()
-    from tqdm import tqdm
+        collate_fn=tempest_collate, batch_size=32, num_workers=0)
+
     for batch in tqdm(dataloader):
-        batch['items'].shape
-        # print(len(batch['src']))
-    # convert_bipartile()
+        print(batch['users'].shape)
+        users = batch['users']
+        empty_users = users == -1
+        batch_size = len(empty_users)
+        users_fill = users.detach()
+
+        users_fill[empty_users] = torch.randint(0, 1000, (int(empty_users.sum()), ))

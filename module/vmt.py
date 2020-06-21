@@ -133,10 +133,12 @@ class VMT(nn.Module):
     def __init__( self, embedding_dim, vocab_size, max_seq_len, padding_idx=Constants.PAD,
             tmp_hidden_size=64, tmp_dec_hidden_size=64, tmp_latent_dim=16, tmp_category=10, desc_latent_dim=87, user_latent_dim=128,
             enc_hidden_size=128, enc_layers=2, enc_bidirect=True, dropout=0.1, dec_layers=2, dec_hidden_size=128, 
-            attention=True, biset=True,
+            attention=True, biset=True, user_embedding=False, user_size=-1,
             gpu=False):
         super(VMT, self).__init__()
 
+        if user_embedding:
+            self.user_embedding = nn.Embedding(user_size, user_latent_dim)
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
 
         self.template_vae = VAE_Gumbel(nn.Embedding(vocab_size, embedding_dim), embedding_dim=embedding_dim, 
