@@ -1,6 +1,6 @@
 # text-subgan
 
-
+1. Preprocess and save data
 
 ```
 python preprocess2.py  \
@@ -11,6 +11,19 @@ python preprocess2.py  \
     -valid_tgt dataset/valid_title.txt \
     -valid_template dataset/valid_template.txt -save_data dataset/kkday -user_data dataset/user_data -overwrite
 ```
+
+2. Train model
+
+```
+python -m cli.tempest_trainer --batch-size 48 --iterations 100000 --biset True --name biset
+```
+
+3. Evaluate 
+
+```
+python -m cli.tempest_trainer --evaluate True -ckpt save/tempest_rec-2020-06-22-01-39-08/checkpoint_66000.pt
+```
+
 
 # Text GAN based on https://github.com/williamSYSU/TextGAN-PyTorch
 

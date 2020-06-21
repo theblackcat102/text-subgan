@@ -36,8 +36,8 @@ class TemplateTrainer():
 
     def __init__(self, args):
         self.args = args
-
-        self.train_dataset = TemPest(args.cache_path, 'train')
+        #                                                  reduce memory load
+        self.train_dataset = TemPest(args.cache_path, 'valid' if args.evaluate else 'train')
         self.valid_dataset = TemPest(args.cache_path, 'valid')
         self.id_mapping = torch.load(os.path.join(args.cache_path, 'id_mapping.pt'))
         user_size = len(self.id_mapping['user2id'])
@@ -77,6 +77,25 @@ class TemplateTrainer():
         self.temp_anneal = 1.0 / N
         self.temp = args.temperature_min 
         self.init_sample_inputs()
+
+    def evaluate(self, checkpoint):
+        self.save_path = './'
+        self.model.load_state_dict(torch.load(checkpoint)['model'])
+        scores = self.calculate_bleu(None, size=100000, smoothing_function=SmoothingFunction().method3)
+        with open('results.txt', 'a') as f:
+            f.write('checkpoint : {}\n'.format(checkpoint))
+            f.write('filter method 3\n')
+            f.write('---------------------\n'.format(checkpoint))
+            for key, value in scores.items():
+                f.write('BLEU-{:<5}| {:>5.3f}\n'.format(key, value))
+
+        scores = self.calculate_bleu(None, size=100000, smoothing_function=SmoothingFunction().method5)
+        with open('results.txt', 'a') as f:
+            f.write('checkpoint : {}\n'.format(checkpoint))
+            f.write('filter method 5\n')
+            f.write('---------------------\n'.format(checkpoint))
+            for key, value in scores.items():
+                f.write('BLEU-{:<5}| {:>5.3f}\n'.format(key, value))
 
     def init_sample_inputs(self):
         batch = next(self.train_iter)
@@ -131,9 +150,9 @@ class TemplateTrainer():
             writer.add_text("Text", samples, step)
             writer.flush() 
 
-    def calculate_bleu(self, writer, step=0, size=2000, ngram=4):
+    def calculate_bleu(self, writer, step=0, size=2000, ngram=4, smoothing_function=SmoothingFunction().method3):
         eval_dataloader = torch.utils.data.DataLoader(self.valid_dataset, num_workers=8,
-                        collate_fn=tempest_collate, batch_size=20, shuffle=False)
+                        collate_fn=tempest_collate, batch_size=20, shuffle=False, drop_last=True)
         sentences, references = [], []
         scores_weights = { str(gram): [1/gram] * gram for gram in range(1, ngram+1)  }
         scores = { str(gram): 0 for gram in range(1, ngram+1)  }
@@ -214,7 +233,7 @@ class TemplateTrainer():
                     sentences.append(sentence)
                     for key, weights in scores_weights.items():
                         scores[key] += sentence_bleu([reference], sentence, weights, 
-                            smoothing_function=SmoothingFunction().method1)
+                            smoothing_function=smoothing_function)
 
                 if len(sentences) > size:
                     break
@@ -227,15 +246,18 @@ class TemplateTrainer():
             for sent in sentences:
                 f.write(' '.join(sent)+'\n')
 
+        for key, weights in scores.items():
+            scores[key] /= len(sentences)
+
         if writer != None:
             if mf_cnt > 0:
                 writer.add_scalar('Val/mf', mf_loss/mf_cnt, step)
                 writer.add_scalar('Val/text', tmf_loss/mf_cnt, step)
 
             for key, weights in scores.items():
-                scores[key] /= len(sentences)
                 writer.add_scalar("Bleu/score-"+key, scores[key], step)
             writer.flush()
+        return scores
 
     def test(self):
         self.step(0)
@@ -396,6 +418,8 @@ class TemplateTrainer():
                 if i % args.check_iter == 0:
                     torch.save({
                         'model': self.model.state_dict(),
+                        'title_rec': self.title_rec.state_dict(),
+                        'prod_embeddings': self.prod_embeddings.state_dict(),
                     }, os.path.join(save_path,'checkpoint_{}.pt'.format(i)))
 
                     torch.save({
@@ -459,6 +483,10 @@ if __name__ == "__main__":
                         default=True, help='Update latent assignment every epoch?')
     parser.add_argument('--biset',type=str2bool, nargs='?',
                         default=False, help='Use BiSET module to fuse article/template feature')
+    parser.add_argument('--evaluate', type=str2bool, nargs='?',
+                        default=False, help='Update latent assignment every epoch?')
+    parser.add_argument('-ckpt','--checkpoint', type=str,
+                        default='', help='Update latent assignment every epoch?')
 
     # parser.add_argument('--dis-weight', type=float, default=0.1)
     parser.add_argument('--kl-weight', type=float, default=1.0)
@@ -477,4 +505,7 @@ if __name__ == "__main__":
     # trainer.step(1)
     # trainer.calculate_bleu(None, size=1000)
     # trainer.test()
-    trainer.train()
+    if args.evaluate:
+        trainer.evaluate(args.checkpoint)
+    else:
+        trainer.train()
