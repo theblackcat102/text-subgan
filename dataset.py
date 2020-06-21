@@ -358,6 +358,8 @@ class TemPest(Dataset):
         self.max_length = max_length
         assert data_type in ['train', 'valid', 'test']
         self.data_pt = torch.load(os.path.join(cache_path, data_type+'.pt'))
+        self.neg_user2prod_mapping = torch.load(os.path.join(cache_path, 'id_mapping.pt'))['neg_user2product']
+
         self.max_length = max_length
         if token_level == 'word':
             tokenizer = WordTokenizer(postfix='tempest_word')
@@ -391,11 +393,26 @@ class TemPest(Dataset):
         tmt = self.tokenizer.encode(data[2])
         user_prod = data[3]
 
+        if len(user_prod) > 0:
+            idx = random.randint(0, len(user_prod)-1)
+            while min(user_prod[idx]) < 0:
+                idx = random.randint(0, len(user_prod)-1)
+
+            prod = user_prod[idx][0]
+            user = user_prod[idx][1]
+            neg_prod = random.choice(self.neg_user2prod_mapping[user])
+        else:
+            user = -1
+            prod = -1
+            neg_prod = -1
+
         return {
             'src': src,
             'tgt': tgt,
             'tmt': tmt,
-            'user_prod': user_prod,
+            'prod': prod,
+            'user': user,
+            'neg_prod': neg_prod,
             'src_length': len(src), 
             'tgt_length': len(tgt),             
             'tmt_length': len(tmt), 
@@ -413,30 +430,21 @@ def tempest_collate(batch, tgt_upper_max_len=40):
     src_max_length = max([d['src_length'] for d in batch ])
     tmp_max_length = max([d['tmt_length'] for d in batch ])
 
-    user_prods = []
+    neg_prods= []
     users = []
     prods = []
     for data in batch:
-        if len(data['user_prod']) > 0:
-            idx = random.randint(0, len(data['user_prod'])-1)
-            while min(data['user_prod'][idx]) < 0:
-                idx = random.randint(0, len(data['user_prod'])-1)
-
-            prods.append(data['user_prod'][idx][0])
-            users.append(data['user_prod'][idx][1])
-        else:
-            users.append(-1)
-            prods.append(-1)
         # add eos, bos here
         tmp_sequences.append(pad_sequence(data['tmt'], tmp_max_length))
         tgt_sequences.append(pad_sequence(data['tgt'], tgt_max_length))
         src_sequences.append(pad_sequence(data['src'], src_max_length))
-
-    # user_prods = np.concatenate(user_prods, axis=0)
-    # user_prods = torch.from_numpy(user_prods).long()
+        users.append(data['user'])
+        prods.append(data['prod'])
+        neg_prods.append(data['neg_prod'])
 
     users = torch.from_numpy(np.array(users)).long()
     prods = torch.from_numpy(np.array(prods)).long()
+    neg_prods = torch.from_numpy(np.array(neg_prods)).long()
 
     src_sequences = np.stack(src_sequences)
     src_sequences = torch.from_numpy(src_sequences).long()
@@ -450,6 +458,7 @@ def tempest_collate(batch, tgt_upper_max_len=40):
     return {
         'users': users,
         'prods': prods,
+        'neg_prods': neg_prods,
         'src': src_sequences,
         'tgt': tgt_sequences,
         'tmt': tmp_sequences,

@@ -2,6 +2,16 @@
 
 
 
+```
+python preprocess2.py  \
+    -train_src dataset/train_article.txt \
+    -train_tgt dataset/train_title.txt \
+    -train_template dataset/train_template.txt \
+    -valid_src dataset/valid_article.txt \
+    -valid_tgt dataset/valid_title.txt \
+    -valid_template dataset/valid_template.txt -save_data dataset/kkday -user_data dataset/user_data -overwrite
+```
+
 # Text GAN based on https://github.com/williamSYSU/TextGAN-PyTorch
 
 1. RelGAN - RelGAN: Relational Generative Adversarial Networks for Text Generation
@@ -73,6 +83,4 @@ python -m cli.kkday_trainer --pretrain-embeddings ./data/kkday_dataset/model-128
 ```
 
 
-```
-python preprocess2.py -train_src dataset/train_article.txt -train_tgt dataset/train_title.txt -train_template dataset/train_template.txt -valid_src dataset/valid_article.txt -valid_tgt dataset/valid_title.txt -valid_template dataset/valid_template.txt -save_data dataset/kkday -user_data dataset/user_data -overwrite
-```
+

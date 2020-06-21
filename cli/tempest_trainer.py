@@ -7,7 +7,9 @@ import os, glob, json
 import config as cfg
 
 from module.vmt import VMT
+from module.recommend import SimpleMF
 from module.vae import GaussianKLLoss
+from module.optimizer import AdamW
 from dataset import TemPest, tempest_collate
 from constant import Constants
 import fasttext
@@ -53,15 +55,16 @@ class TemplateTrainer():
         self.train_iter = data_iter(torch.utils.data.DataLoader(self.train_dataset, num_workers=3,
                         collate_fn=tempest_collate, batch_size=args.batch_size, shuffle=True, 
                         drop_last=True))
-        # self.valid_iter = data_iter(torch.utils.data.DataLoader(self.valid_dataset, num_workers=3,
-        #                 collate_fn=tempest_collate, batch_size=args.batch_size, shuffle=False, 
-        #                 drop_last=True))
         self.prod_embeddings = nn.Embedding(self.prod_size+1, args.user_latent_dim).cuda()
+        torch.nn.init.xavier_uniform_(self.prod_embeddings.weight)
 
         self.gen_opt = optim.Adam(self.model.parameters(), lr=args.gen_lr)
         self.tmp_opt = optim.Adam(self.model.template_vae.parameters(), lr=args.gen_lr)
         self.rec_opt = optim.Adam(list(self.model.user_embedding.parameters()) + list(self.prod_embeddings.parameters()), 
-            args.rec_lr, weight_decay=1e-5  )
+            args.rec_lr, weight_decay=1e-5 )
+
+        self.title_rec = SimpleMF( self.prod_size+1, self.train_dataset.vocab_size, user_embedding=self.prod_embeddings, n_factors=args.user_latent_dim).cuda()
+        self.dis_opt = AdamW(self.title_rec.parameters(), lr=args.dis_lr, weight_decay=1e-5)
 
         self.mle_criterion = nn.NLLLoss(ignore_index=Constants.PAD)
         self.KL_loss = GaussianKLLoss()
@@ -73,6 +76,7 @@ class TemplateTrainer():
         self.gumbel_anneal_rate = 1 / N
         self.temp_anneal = 1.0 / N
         self.temp = args.temperature_min 
+        self.init_sample_inputs()
 
     def init_sample_inputs(self):
         batch = next(self.train_iter)
@@ -83,15 +87,59 @@ class TemplateTrainer():
         empty_users = users == -1
         batch_size = len(empty_users)
         users_filled = users.detach()
-        users_filled[empty_users] = torch.randint(0, self.user_size, ( int(empty_users.sum()) ))
+        users_filled[empty_users] = torch.randint(0, self.user_size, ( int(empty_users.sum()),  ))
+
+        self.tmt_ = tmp.cuda()
+        self.users_ = users_filled.cuda()
+        self.inputs_ = inputs.cuda()
+        self.target_ = target.cuda()
+        self.src_ = src_inputs.cuda()
+        
+    def sample_results(self, writer, step=0):
+        sample_size = 5
+
+        desc_outputs, desc_latent, _, _ = self.model.encode_desc(self.src_)
+        tmp_outputs, tmp_latent = self.model.encode_tmp(self.tmt_)
+
+        user_embeddings = self.model.user_embedding( self.users_ )
+        output_target, output_title = self.model.decode(tmp_latent, desc_latent, user_embeddings, 
+                desc_outputs, tmp_outputs,
+                max_length=self.target_.shape[1])
+
+        # output_title = torch.argmax(output1_logits, dim=-1)
+        # output_title2 = torch.argmax(output2_logits, dim=-1)
+        samples, new_sample = '', ''
+        with torch.no_grad():
+            for idx, sent in enumerate(output_title):
+
+                sentence = []
+                for token in self.tmt_[idx][1:]:
+                    if token.item() == Constants.EOS:
+                        break
+                    sentence.append(  self.valid_dataset.tokenizer.idx2word[token.item()])
+                samples += str(idx) + '. [tmp]: ' +' '.join(sentence) + '\n\n'
+
+                sentence = []
+                for token in sent:
+                    if token.item() == Constants.EOS:
+                        break
+                    sentence.append(  self.valid_dataset.tokenizer.idx2word[token.item()])
+                samples += '       [out]: ' +' '.join(sentence[:30]) + '\n\n'
 
 
-    def calculate_bleu(self, writer, step=0, size=1000, ngram=4):
+        if writer != None:
+            writer.add_text("Text", samples, step)
+            writer.flush() 
+
+    def calculate_bleu(self, writer, step=0, size=2000, ngram=4):
         eval_dataloader = torch.utils.data.DataLoader(self.valid_dataset, num_workers=8,
                         collate_fn=tempest_collate, batch_size=20, shuffle=False)
         sentences, references = [], []
         scores_weights = { str(gram): [1/gram] * gram for gram in range(1, ngram+1)  }
         scores = { str(gram): 0 for gram in range(1, ngram+1)  }
+        mf_loss = 0
+        tmf_loss = 0
+        mf_cnt = 0
 
         # print('Evaluate bleu scores', scores)
         with torch.no_grad():
@@ -118,7 +166,36 @@ class TemplateTrainer():
                 user_embeddings = self.model.user_embedding( users_filled )
                 _, output_title = self.model.decode(tmp_latent, desc_latent, user_embeddings, 
                         desc_outputs, tmp_outputs,
-                        max_length=target.shape[1])                
+                        max_length=target.shape[1])
+
+                non_empty_users = (batch['users'] != -1) & (batch['prods'] != -1)
+                if non_empty_users.sum() > 0:
+                    prods = batch['prods'][non_empty_users]
+                    users = batch['users'][non_empty_users]
+                    neg_prods = batch['neg_prods'][non_empty_users]
+                    users, prods, neg_prods = users.cuda(), prods.cuda(), neg_prods.cuda()
+
+                    user_embed = self.model.user_embedding( users )
+                    prod_embed  = self.prod_embeddings( prods )
+                    prediction = (user_embed*prod_embed).sum(1)
+
+                    rating = torch.ones(prediction.shape).float().cuda()
+                    n_rating = (torch.randn(prediction.shape)*0.01 + torch.zeros(prediction.shape)).float().cuda() 
+
+                    n_prod_embed  = self.prod_embeddings( neg_prods )
+                    neg_prediction = (user_embed*n_prod_embed).sum(1)
+
+                    mf_loss_ = self.mse_criterion(prediction, rating) + self.mse_criterion(neg_prediction, n_rating)
+
+                    mf_loss += mf_loss_.item()
+                    mf_cnt += 1
+
+                    prediction = self.title_rec( prods,  target[ non_empty_users.cuda() ])
+                    n_prediction = self.title_rec( neg_prods,  target[ non_empty_users.cuda() ])
+
+                    tmf_loss += (self.mse_criterion( prediction, rating ).item() + + self.mse_criterion(n_prediction, n_rating).item())
+
+
                 # output_title = torch.argmax(output_logits, dim=-1)
                 for idx, sent_token in enumerate(batch['tgt'][:, 1:]):
                     reference = []
@@ -151,6 +228,10 @@ class TemplateTrainer():
                 f.write(' '.join(sent)+'\n')
 
         if writer != None:
+            if mf_cnt > 0:
+                writer.add_scalar('Val/mf', mf_loss/mf_cnt, step)
+                writer.add_scalar('Val/text', tmf_loss/mf_cnt, step)
+
             for key, weights in scores.items():
                 scores[key] /= len(sentences)
                 writer.add_scalar("Bleu/score-"+key, scores[key], step)
@@ -210,28 +291,44 @@ class TemplateTrainer():
 
         non_empty_users = (batch['users'] != -1) & (batch['prods'] != -1)
         mf_loss = 0
+        tmf_loss = 0
         if non_empty_users.sum() > 0:
             prods = batch['prods'][non_empty_users]
             users = batch['users'][non_empty_users]
-            users, prods = users.cuda(), prods.cuda()
+            neg_prods = batch['neg_prods'][non_empty_users]
+
+            users, prods, neg_prods = users.cuda(), prods.cuda(), neg_prods.cuda()
 
             # print(users.max(), prods.max(), prods.min(), users.min())
+            self.rec_opt.zero_grad()
 
             user_embed = self.model.user_embedding( users )
-
             prod_embed  = self.prod_embeddings( prods )
-
             prediction = (user_embed*prod_embed).sum(1)
+            rating = torch.ones(prediction.shape).float().cuda()
 
             rating = torch.ones(prediction.shape).float().cuda()
-            
-            self.rec_opt.zero_grad()
-            mf_loss = self.mse_criterion(prediction, rating)
+            n_rating = (torch.randn(prediction.shape)*0.01 + torch.zeros(prediction.shape)).float().cuda() 
+
+            n_prod_embed  = self.prod_embeddings( neg_prods )
+            neg_prediction = (user_embed*n_prod_embed).sum(1)
+
+            mf_loss = self.mse_criterion(prediction, rating) + self.mse_criterion(neg_prediction, n_rating)
+
             mf_loss.backward()
             self.rec_opt.step()
 
             mf_loss = mf_loss.item()
-        return total_loss.item(), construct_loss.item(), desc_kl_loss.item(), nll_loss.item(), kl_loss.item(), mf_loss
+
+            self.dis_opt.zero_grad()
+            prediction = self.title_rec( prods,  target[ non_empty_users.cuda() ])
+            n_prediction = self.title_rec( neg_prods,  target[ non_empty_users.cuda() ])
+            tmf_loss_ = self.mse_criterion( prediction, rating ) + self.mse_criterion(n_prediction, n_rating)
+            tmf_loss_.backward()
+            self.dis_opt.step()
+            tmf_loss = tmf_loss_.item()
+
+        return total_loss.item(), construct_loss.item(), desc_kl_loss.item(), nll_loss.item(), kl_loss.item(), mf_loss, tmf_loss
 
     def train(self):
         if self.args.pretrain_embeddings != None:
@@ -257,7 +354,6 @@ class TemplateTrainer():
             json.dump(vars(self.args), f)
         writer = SummaryWriter('logs/tempest_{}-{}'.format(self.args.name, cur_time))
 
-
         i = 0
         self.temp = self.args.kl_weight
         self.gumbel_temp = np.minimum(self.args.gumbel_max - (self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i)), 0.00005)
@@ -265,7 +361,7 @@ class TemplateTrainer():
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
                 self.model.train()
-                total_loss, construct_loss, desc_kl_loss, nll_loss, kl_loss, mf_loss = self.step(i)
+                total_loss, construct_loss, desc_kl_loss, nll_loss, kl_loss, mf_loss, tmf_loss = self.step(i)
 
                 pbar.update(1)
                 pbar.set_description(
@@ -281,6 +377,7 @@ class TemplateTrainer():
                         't_kl': kl_loss,
                         't_xent': nll_loss,
                         'mf': prev_mf_loss,
+                        'prod_title_align': tmf_loss,
                     }
                     for key, value in loss_val.items():
                         writer.add_scalar('G/'+key, value, i)
@@ -289,6 +386,12 @@ class TemplateTrainer():
                     self.model.eval()
                     self.calculate_bleu(writer, i)
                     self.model.train()
+
+                if i % 100 == 0:
+                    self.model.eval(), self.prod_embeddings.eval(), self.title_rec.eval()
+                    self.sample_results(writer, i)
+                    self.model.train(), self.prod_embeddings.train(), self.title_rec.train()
+                    # self.gumbel_temp = np.maximum(self.args.gumbel_max ** (self.gumbel_anneal_rate * i), 0.00005)
 
                 if i % args.check_iter == 0:
                     torch.save({
@@ -318,7 +421,7 @@ if __name__ == "__main__":
     parser.add_argument('--pretrain-embeddings', type=str, default=None)
     parser.add_argument('--iterations', type=int, default=50000)
     parser.add_argument('--check-iter', type=int, default=1000, help='checkpoint every 1k')
-    parser.add_argument('--bleu-iter', type=int, default=400, help='bleu evaluation step')
+    parser.add_argument('--bleu-iter', type=int, default=1000, help='bleu evaluation step')
     parser.add_argument('--pretrain-gen', type=str, default=None)
     parser.add_argument('--gen-steps', type=int, default=1)
     parser.add_argument('--dis-steps', type=int, default=1)
@@ -330,7 +433,7 @@ if __name__ == "__main__":
     parser.add_argument('--tmp-cat-dim', type=int, default=10)
 
     parser.add_argument('--desc-latent-dim', type=int, default=32)
-    parser.add_argument('--user-latent-dim', type=int, default=64)
+    parser.add_argument('--user-latent-dim', type=int, default=48)
     parser.add_argument('--gen-embed-dim', type=int, default=128)
 
     parser.add_argument('--dis-embed-dim', type=int, default=64)
@@ -344,10 +447,10 @@ if __name__ == "__main__":
 
     parser.add_argument('--anneal-rate', type=float, default=0.00002)
 
-    parser.add_argument('--gen-lr', type=float, default=0.0001)
-    parser.add_argument('--rec-lr', type=float, default=0.0001)
+    parser.add_argument('--gen-lr', type=float, default=0.0005)
+    parser.add_argument('--rec-lr', type=float, default=0.001)
+    parser.add_argument('--dis-lr', type=float, default=0.001)
 
-    # parser.add_argument('--dis-lr', type=float, default=0.001)
     parser.add_argument('--grad-penalty', type=str2bool, nargs='?',
                         default=False, help='Apply gradient penalty')
     parser.add_argument('--full-text', type=str2bool, nargs='?',
@@ -358,7 +461,7 @@ if __name__ == "__main__":
                         default=False, help='Use BiSET module to fuse article/template feature')
 
     # parser.add_argument('--dis-weight', type=float, default=0.1)
-    # parser.add_argument('--kl-weight', type=float, default=1.0)
+    parser.add_argument('--kl-weight', type=float, default=1.0)
     # parser.add_argument('--opt-level', type=str, default='O1')
     # parser.add_argument('--cycle-weight', type=float, default=0.2)
     # parser.add_argument('--re-weight', type=float, default=0.5)

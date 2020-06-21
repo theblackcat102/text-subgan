@@ -4,6 +4,7 @@ from collections import defaultdict
 from logging.handlers import RotatingFileHandler
 import torch
 from tokenizer import WordTokenizer
+import random
 FORMAT = '%(asctime)-15s %(message)s'
 logging.basicConfig(format=FORMAT)
 
@@ -17,6 +18,7 @@ def preprocess_data(src_text, tgt_text, template_txt, user_data, cache_path, cor
     logger.info("Build user data mapping")
     user2id = defaultdict(int)
     prod2id = defaultdict(int)
+    neg_user2product = defaultdict(list)
     user2product, product2user = defaultdict(list), defaultdict(list)
     
     title2product = defaultdict(list)
@@ -59,11 +61,19 @@ def preprocess_data(src_text, tgt_text, template_txt, user_data, cache_path, cor
 
     torch.save(data, os.path.join(cache_path, corpus_type+'.pt'))
     if corpus_type == 'train':
+        for user_id, products in user2product.items():
+            neg_prods = []
+            while len(neg_prods) < 80:
+                rand_prod = random.randint(0, len(prod2id))
+                if rand_prod not in products:
+                    neg_prods.append(rand_prod)
+            neg_user2product[user_id] = neg_prods
         id_mapping = {
             'user2id': user2id,
             'prod2id': prod2id,
             'user2product': user2product,
             'product2user': product2user,
+            'neg_user2product': neg_user2product,
             'title2product': title2product,
         }
         torch.save(id_mapping, os.path.join(cache_path, 'id_mapping.pt'))
