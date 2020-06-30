@@ -591,14 +591,13 @@ if __name__ == "__main__":
     dataset = TemPest('dataset/', 'valid')
     print(len(dataset))
 
-    dataloader = torch.utils.data.DataLoader(dataset, 
-        collate_fn=tempest_collate, batch_size=32, num_workers=0)
+    # dataloader = torch.utils.data.DataLoader(dataset, 
+    #     collate_fn=tempest_collate, batch_size=32, num_workers=0)
 
-    for batch in tqdm(dataloader):
-        print(batch['users'].shape)
-        users = batch['users']
-        empty_users = users == -1
-        batch_size = len(empty_users)
-        users_fill = users.detach()
-
-        users_fill[empty_users] = torch.randint(0, 1000, (int(empty_users.sum()), ))
+    # for batch in tqdm(dataloader):
+    #     print(batch['users'].shape)
+    #     users = batch['users']
+    #     empty_users = users == -1
+    #     batch_size = len(empty_users)
+    #     users_fill = users.detach()
+    #     users_fill[empty_users] = torch.randint(0, 1000, (int(empty_users.sum()), ))

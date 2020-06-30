@@ -5,6 +5,7 @@ from logging.handlers import RotatingFileHandler
 import torch
 from tokenizer import WordTokenizer
 import random
+from tqdm import tqdm
 FORMAT = '%(asctime)-15s %(message)s'
 logging.basicConfig(format=FORMAT)
 
@@ -20,7 +21,19 @@ def preprocess_data(src_text, tgt_text, template_txt, user_data, cache_path, cor
     prod2id = defaultdict(int)
     neg_user2product = defaultdict(list)
     user2product, product2user = defaultdict(list), defaultdict(list)
-    
+    user2product_mask = {}
+    if corpus_type not in ('valid', 'test' ): # load validation user2product mapping and mask from training 
+        for name in ['valid.pt', 'test.pt']:
+            valid_data = torch.load(os.path.join(cache_path, name))
+            
+            for e in valid_data:
+                if len(e[3]) > 0:
+                    for (prod, user) in e[3]:
+                        if user not in user2product_mask:
+                            user2product_mask[user] = {}
+                        if prod not in user2product_mask[user]:
+                            user2product_mask[user][prod] = 1
+
     title2product = defaultdict(list)
 
     with open(os.path.join(user_data, 'user_records.txt'), 'r') as f, open('found_title.txt', 'w') as g:
@@ -35,15 +48,21 @@ def preprocess_data(src_text, tgt_text, template_txt, user_data, cache_path, cor
 
                 if prod_id not in prod2id:
                     prod2id[prod_id] = len(prod2id)
-                user2product[ user2id[user_id] ].append( prod2id[prod_id] )
-                product2user[ prod2id[prod_id] ].append( user2id[user_id] )
+
+                uid = user2id[user_id]
+                pid = prod2id[prod_id]
+
+                if (uid not in user2product_mask) or (uid in user2product_mask and pid not in user2product_mask[uid]):
+                    user2product[ uid ].append( pid )
+                    product2user[ pid ].append( uid )
+
                 if os.path.exists(os.path.join(user_data, 'prod_title_after/prod_title_'+prod_id+'.txt' )):
                     with open(os.path.join(user_data, 'prod_title_after/prod_title_'+prod_id+'.txt' ), 'r') as f:
                         title = f.readline()
                         title = title.strip().replace('\u3000', ' ')
                         # if title in title2product:
                         #     logger.warning('exist before %s, %s' % (prod_id, title2product[title]))
-                        title2product[title].append(prod2id[prod_id])
+                        title2product[title].append(pid)
                         g.write(title+'\n')
     hit = 0
     logger.info('total title2product %d, total products %d' % (len(title2product), len(prod2id)))  
@@ -53,21 +72,33 @@ def preprocess_data(src_text, tgt_text, template_txt, user_data, cache_path, cor
             user_prod_pair = []
             src, tgt, tmt = src.strip(), tgt.strip(), tmt.strip()
             if tgt in title2product:
-                hit += 1
                 for prod in title2product[tgt]:
-                    for user in product2user[ prod ]:
-                        user_prod_pair.append( [prod, user] )
+                    if prod in product2user:
+                        for user in product2user[ prod ]:
+                            hit += 1
+                            user_prod_pair.append( [prod, user] )
             data.append( [ src, tgt, tmt,  user_prod_pair ] )
 
+    print('user2product : ', len(user2product))
+    print('product2user : ', len(product2user))
+    print('hit rate:    ', hit)
+
     torch.save(data, os.path.join(cache_path, corpus_type+'.pt'))
+    print('user size : ', len(user2id))
+    print('prod size : ', len(prod2id))
+
     if corpus_type == 'train':
-        for user_id, products in user2product.items():
+        for user_id, products in tqdm(user2product.items(), dynamic_ncols=True):
             neg_prods = []
-            while len(neg_prods) < 80:
+            start = 0
+            while len(neg_prods) < 100:
                 rand_prod = random.randint(0, len(prod2id))
+                # print(rand_prod, products)
                 if rand_prod not in products:
                     neg_prods.append(rand_prod)
             neg_user2product[user_id] = neg_prods
+
+
         id_mapping = {
             'user2id': user2id,
             'prod2id': prod2id,
@@ -99,7 +130,9 @@ if __name__ == "__main__":
     parser = _get_parser()
 
     opt = parser.parse_args()
-    preprocess_data(opt.train_src[0], opt.train_tgt[0], opt.train_template[0], opt.user_data, 
+    preprocess_data(opt.valid_src, opt.valid_tgt, opt.valid_template, opt.user_data, 
+        cache_path=opt.save_data, corpus_type='valid')
+    preprocess_data(opt.test_src, opt.test_tgt, opt.test_template, opt.user_data, 
+        cache_path=opt.save_data, corpus_type='test')
+    preprocess_data(opt.train_src, opt.train_tgt, opt.train_template, opt.user_data, 
         cache_path=opt.save_data, corpus_type='train')
-    # preprocess_data(opt.valid_src, opt.valid_tgt, opt.valid_template, opt.user_data, 
-    #     cache_path=opt.save_data, corpus_type='valid')

@@ -13,6 +13,7 @@ from module.optimizer import AdamW
 from dataset import TemPest, tempest_collate
 from constant import Constants
 import fasttext
+from eval_metrics import precision_at_k, recall_at_k, mapk, ndcg_k
 from utils import get_fixed_temperature, get_losses
 import sklearn
 import numpy as np
@@ -72,30 +73,69 @@ class TemplateTrainer():
         self.xent_criterion = nn.CrossEntropyLoss()
 
         self.gumbel_temp = 1.0
+        self.l2 = args.l2_weight
         N = args.iterations
         self.gumbel_anneal_rate = 1 / N
         self.temp_anneal = 1.0 / N
         self.temp = args.temperature_min 
         self.init_sample_inputs()
 
-    def evaluate(self, checkpoint):
+    def evaluate(self, checkpoint_name):
         self.save_path = './'
-        self.model.load_state_dict(torch.load(checkpoint)['model'])
+        checkpoint = torch.load(checkpoint_name)
+        self.model.eval()
+        self.model.load_state_dict(checkpoint['model'])
         scores = self.calculate_bleu(None, size=100000, smoothing_function=SmoothingFunction().method3)
         with open('results.txt', 'a') as f:
-            f.write('checkpoint : {}\n'.format(checkpoint))
+            f.write('--------------------------------\n')
+            f.write('checkpoint : {}\n'.format(checkpoint_name))
             f.write('filter method 3\n')
-            f.write('---------------------\n'.format(checkpoint))
+            f.write('|  BLEU  |  score   |\n')
+            f.write('|--------|----------|\n'.format(checkpoint_name))
             for key, value in scores.items():
-                f.write('BLEU-{:<5}| {:>5.3f}\n'.format(key, value))
+                f.write('|BLEU-{:<5}| {:>5.3f}|\n'.format(key, value))
 
         scores = self.calculate_bleu(None, size=100000, smoothing_function=SmoothingFunction().method5)
         with open('results.txt', 'a') as f:
-            f.write('checkpoint : {}\n'.format(checkpoint))
             f.write('filter method 5\n')
-            f.write('---------------------\n'.format(checkpoint))
+            f.write('|  BLEU  |  score   |\n')
+            f.write('|--------|----------|\n'.format(checkpoint_name))
             for key, value in scores.items():
-                f.write('BLEU-{:<5}| {:>5.3f}\n'.format(key, value))
+                f.write('|BLEU-{:<5}| {:>5.3f}|\n'.format(key, value))
+
+        # already mapped to id value
+        user2product = self.id_mapping['user2product']
+        eval_dataloader = torch.utils.data.DataLoader(self.valid_dataset, num_workers=8,
+                        collate_fn=tempest_collate, batch_size=20, shuffle=False, drop_last=True)
+
+        self.prod_embeddings.load_state_dict(checkpoint['prod_embeddings'])
+        actual = []
+        predicted = []
+        with torch.no_grad():
+            for batch in eval_dataloader:
+                users = batch['users']
+                non_empty_users = users != -1 
+                if non_empty_users.sum() > 0:
+                    users = users[non_empty_users].cuda()
+                    user_embeddings = self.model.user_embedding( users )
+                    for user_embed, user_id in zip(user_embeddings, users):
+                        rank = torch.argsort((user_embed * self.prod_embeddings.weight).mean(1), descending=True)
+                        actual.append( user2product[user_id.item()] )
+                        predicted.append(rank.cpu().numpy())
+
+        if len(predicted) > 10:
+            print(actual[0])
+            with open('results.txt', 'a') as f:
+                f.write('Recommendation Performance: \n')
+                f.write('Recall@5 {:>10.3f}\n'.format(recall_at_k(actual, predicted, 5)))
+                f.write('Recall@10 {:>10.3f}\n'.format(recall_at_k(actual, predicted, 10)))
+
+                f.write('Precision@5 {:>10.3f}\n'.format(precision_at_k(actual, predicted, 5)))
+                f.write('Precision@10 {:>10.3f}\n'.format(precision_at_k(actual, predicted, 10)))
+
+                f.write('NDCG@5 {:>10.3f}\n'.format(ndcg_k(actual, predicted, 5)))
+                f.write('NDCG@10 {:>10.3f}\n'.format(ndcg_k(actual, predicted, 10)))
+
 
     def init_sample_inputs(self):
         batch = next(self.train_iter)
@@ -191,28 +231,27 @@ class TemplateTrainer():
                 if non_empty_users.sum() > 0:
                     prods = batch['prods'][non_empty_users]
                     users = batch['users'][non_empty_users]
-                    neg_prods = batch['neg_prods'][non_empty_users]
-                    users, prods, neg_prods = users.cuda(), prods.cuda(), neg_prods.cuda()
+                    # neg_prods = batch['neg_prods'][non_empty_users]
+                    users, prods = users.cuda(), prods.cuda()
 
                     user_embed = self.model.user_embedding( users )
                     prod_embed  = self.prod_embeddings( prods )
                     prediction = (user_embed*prod_embed).sum(1)
 
                     rating = torch.ones(prediction.shape).float().cuda()
-                    n_rating = (torch.randn(prediction.shape)*0.01 + torch.zeros(prediction.shape)).float().cuda() 
+                    # n_rating = (torch.randn(prediction.shape)*0.01 + torch.zeros(prediction.shape)).float().cuda() 
 
-                    n_prod_embed  = self.prod_embeddings( neg_prods )
-                    neg_prediction = (user_embed*n_prod_embed).sum(1)
+                    # n_prod_embed  = self.prod_embeddings( neg_prods )
+                    # neg_prediction = (user_embed*n_prod_embed).sum(1)
 
-                    mf_loss_ = self.mse_criterion(prediction, rating) + self.mse_criterion(neg_prediction, n_rating)
-
-                    mf_loss += mf_loss_.item()
+                    mf_loss_ = self.mse_criterion(prediction, rating) #+ self.mse_criterion(neg_prediction, n_rating)
+                    mf_loss += mf_loss_.item() 
                     mf_cnt += 1
 
                     prediction = self.title_rec( prods,  target[ non_empty_users.cuda() ])
-                    n_prediction = self.title_rec( neg_prods,  target[ non_empty_users.cuda() ])
+                    # n_prediction = self.title_rec( neg_prods,  target[ non_empty_users.cuda() ])
 
-                    tmf_loss += (self.mse_criterion( prediction, rating ).item() + + self.mse_criterion(n_prediction, n_rating).item())
+                    tmf_loss += (self.mse_criterion( prediction, rating ).item() )
 
 
                 # output_title = torch.argmax(output_logits, dim=-1)
@@ -318,8 +357,8 @@ class TemplateTrainer():
             prods = batch['prods'][non_empty_users]
             users = batch['users'][non_empty_users]
             neg_prods = batch['neg_prods'][non_empty_users]
-
-            users, prods, neg_prods = users.cuda(), prods.cuda(), neg_prods.cuda()
+            neg_prods = neg_prods.cuda()
+            users, prods = users.cuda(), prods.cuda()
 
             # print(users.max(), prods.max(), prods.min(), users.min())
             self.rec_opt.zero_grad()
@@ -335,7 +374,16 @@ class TemplateTrainer():
             n_prod_embed  = self.prod_embeddings( neg_prods )
             neg_prediction = (user_embed*n_prod_embed).sum(1)
 
-            mf_loss = self.mse_criterion(prediction, rating) + self.mse_criterion(neg_prediction, n_rating)
+            mf_loss_ = self.mse_criterion(prediction, rating) + self.mse_criterion(neg_prediction, n_rating)
+            L2_reg = torch.tensor(0., requires_grad=True).cuda()
+            for name, param in self.prod_embeddings.named_parameters():
+                if 'weight' in name:
+                    L2_reg = L2_reg + torch.norm(param, 2).cuda()
+            for name, param in self.model.user_embedding.named_parameters():
+                if 'weight' in name:
+                    L2_reg = L2_reg + torch.norm(param, 2).cuda()
+
+            mf_loss = mf_loss_ + self.l2*L2_reg
 
             mf_loss.backward()
             self.rec_opt.step()
@@ -490,6 +538,7 @@ if __name__ == "__main__":
 
     # parser.add_argument('--dis-weight', type=float, default=0.1)
     parser.add_argument('--kl-weight', type=float, default=1.0)
+    parser.add_argument('--l2-weight', type=float, default=1e-3)
     # parser.add_argument('--opt-level', type=str, default='O1')
     # parser.add_argument('--cycle-weight', type=float, default=0.2)
     # parser.add_argument('--re-weight', type=float, default=0.5)
