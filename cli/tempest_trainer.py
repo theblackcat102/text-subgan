@@ -23,7 +23,7 @@ from nltk.translate.bleu_score import sentence_bleu
 from nltk.translate.bleu_score import SmoothingFunction
 from shutil import copyfile
 import pickle
-
+from time import time
 
 def data_iter(dataloader):
     def function():
@@ -124,7 +124,7 @@ class TemplateTrainer():
                         predicted.append(rank.cpu().numpy())
 
         if len(predicted) > 10:
-            print(actual[0])
+            print(actual[0], actual[1])
             with open('results.txt', 'a') as f:
                 f.write('Recommendation Performance: \n')
                 f.write('Recall@5 {:>10.3f}\n'.format(recall_at_k(actual, predicted, 5)))
@@ -199,8 +199,35 @@ class TemplateTrainer():
         mf_loss = 0
         tmf_loss = 0
         mf_cnt = 0
+        start_t = time()
+        user2product = self.id_mapping['user2product']
 
+        actual = []
+        predicted = []
+        with torch.no_grad():
+            for batch in eval_dataloader:
+                users = batch['users']
+                non_empty_users = users != -1 
+                if non_empty_users.sum() > 0:
+                    users = users[non_empty_users].cuda()
+                    user_embeddings = self.model.user_embedding( users )
+                    for user_embed, user_id in zip(user_embeddings, users):
+                        rank = torch.argsort((user_embed * self.prod_embeddings.weight).mean(1), descending=True)
+                        actual.append( user2product[user_id.item()] )
+                        predicted.append(rank.cpu().numpy())
+
+        if len(predicted) > 10 and writer != None:
+            writer.add_scalar('Rec/Recall@5',recall_at_k(actual, predicted, 5), step)
+            writer.add_scalar('Rec/Recall@10',recall_at_k(actual, predicted, 10), step)
+
+            writer.add_scalar('Rec/Precision@5',precision_at_k(actual, predicted, 5), step)
+            writer.add_scalar('Rec/Precision@10',precision_at_k(actual, predicted, 10), step)
+
+            writer.add_scalar('Rec/NDCG@5',ndcg_k(actual, predicted, 5), step)
+            writer.add_scalar('Rec/NDCG@10',ndcg_k(actual, predicted, 10), step)
+        # print('recomend eval end : ', time()-start_t)
         # print('Evaluate bleu scores', scores)
+        start_t = time()
         with torch.no_grad():
             for batch in eval_dataloader:
                 src_inputs = batch['src']
@@ -276,6 +303,7 @@ class TemplateTrainer():
 
                 if len(sentences) > size:
                     break
+        # print('bleu eval end : ', time()-start_t)
 
         with open(os.path.join(self.save_path, '{}_reference.txt'.format(0)), 'w') as f:
             for sent in references:
