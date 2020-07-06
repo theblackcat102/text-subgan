@@ -7,6 +7,7 @@ import os, glob, json
 import config as cfg
 
 from module.vmt import VMT
+from module.gate import GATE, Pointer
 from module.recommend import SimpleMF
 from module.vae import GaussianKLLoss
 from module.optimizer import AdamW
@@ -48,7 +49,7 @@ class TemplateTrainer():
         self.args.vocab_size = self.train_dataset.vocab_size
 
         self.model = VMT(args.gen_embed_dim, self.train_dataset.vocab_size,
-            enc_hidden_size=500, dec_hidden_size=500, tmp_category=args.tmp_cat_dim,
+            enc_hidden_size=128, dec_hidden_size=128, tmp_category=args.tmp_cat_dim,
             tmp_latent_dim=args.tmp_latent_dim, desc_latent_dim=args.desc_latent_dim, user_latent_dim=args.user_latent_dim,
             biset=args.biset, user_embedding=True, user_size=user_size,
             max_seq_len=args.max_seq_len-1, gpu=True).cuda()
@@ -56,19 +57,21 @@ class TemplateTrainer():
         self.train_iter = data_iter(torch.utils.data.DataLoader(self.train_dataset, num_workers=3,
                         collate_fn=tempest_collate, batch_size=args.batch_size, shuffle=True, 
                         drop_last=True))
-        self.prod_embeddings = nn.Embedding(self.prod_size+1, args.user_latent_dim).cuda()
-        torch.nn.init.xavier_uniform_(self.prod_embeddings.weight)
+        self.gate = Pointer( self.model.user_embedding,  nn.Embedding(self.prod_size+1, args.user_latent_dim), 
+            text_feature=args.desc_latent_dim).cuda()
+        torch.nn.init.xavier_uniform_(self.gate.item_embeddings.weight)
 
         self.gen_opt = optim.Adam(self.model.parameters(), lr=args.gen_lr)
         self.tmp_opt = optim.Adam(self.model.template_vae.parameters(), lr=args.gen_lr)
-        self.rec_opt = optim.Adam(list(self.model.user_embedding.parameters()) + list(self.prod_embeddings.parameters()), 
-            args.rec_lr, weight_decay=1e-5 )
+        self.rec_opt = optim.Adam(self.gate.parameters(), lr=args.rec_lr, weight_decay=1e-5 )
 
-        self.title_rec = SimpleMF( self.prod_size+1, self.train_dataset.vocab_size, user_embedding=self.prod_embeddings, n_factors=args.user_latent_dim).cuda()
+        self.title_rec = SimpleMF( self.prod_size+1, self.train_dataset.vocab_size, user_embedding=self.gate.item_embeddings, n_factors=args.user_latent_dim).cuda()
         self.dis_opt = AdamW(self.title_rec.parameters(), lr=args.dis_lr, weight_decay=1e-5)
 
         self.mle_criterion = nn.NLLLoss(ignore_index=Constants.PAD)
         self.KL_loss = GaussianKLLoss()
+        pos_weight = torch.ones([1])*2
+        self.bce_criterion = nn.BCEWithLogitsLoss(pos_weight.cuda())
         self.mse_criterion = nn.MSELoss()
         self.xent_criterion = nn.CrossEntropyLoss()
 
@@ -108,23 +111,28 @@ class TemplateTrainer():
         eval_dataloader = torch.utils.data.DataLoader(self.valid_dataset, num_workers=8,
                         collate_fn=tempest_collate, batch_size=20, shuffle=False, drop_last=True)
 
-        self.prod_embeddings.load_state_dict(checkpoint['prod_embeddings'])
+        self.item_embeddings.load_state_dict(checkpoint['prod_embeddings'])
         actual = []
         predicted = []
         with torch.no_grad():
             for batch in eval_dataloader:
                 users = batch['users']
+                src_inputs = batch['src']
+                tmp = batch['tmt']
+                inputs, target = batch['tgt'][:, :-1], batch['tgt'][:, 1:]
+                _, desc_latent, _, _ = self.model.encode_desc(src_inputs.cuda())
+
                 non_empty_users = users != -1 
                 if non_empty_users.sum() > 0:
                     users = users[non_empty_users].cuda()
-                    user_embeddings = self.model.user_embedding( users )
-                    for user_embed, user_id in zip(user_embeddings, users):
-                        rank = torch.argsort((user_embed * self.prod_embeddings.weight).mean(1), descending=True)
+                    rec_desc_latent = desc_latent[non_empty_users.cuda()]
+                    for idx, user_id in enumerate(users):
+                        _, rank = self.gate.inference(user_id.unsqueeze(0), rec_desc_latent[[idx]])
                         actual.append( user2product[user_id.item()] )
                         predicted.append(rank.cpu().numpy())
 
         if len(predicted) > 10:
-            print(actual[0], actual[1])
+            # print(actual[0], actual[1])
             with open('results.txt', 'a') as f:
                 f.write('Recommendation Performance: \n')
                 f.write('Recall@5 {:>10.3f}\n'.format(recall_at_k(actual, predicted, 5)))
@@ -207,12 +215,15 @@ class TemplateTrainer():
         with torch.no_grad():
             for batch in eval_dataloader:
                 users = batch['users']
+                src_inputs = batch['src']
+                _, desc_latent, _, _ = self.model.encode_desc(src_inputs.cuda())
+
                 non_empty_users = users != -1 
                 if non_empty_users.sum() > 0:
                     users = users[non_empty_users].cuda()
-                    user_embeddings = self.model.user_embedding( users )
-                    for user_embed, user_id in zip(user_embeddings, users):
-                        rank = torch.argsort((user_embed * self.prod_embeddings.weight).mean(1), descending=True)
+                    rec_desc_latent = desc_latent[non_empty_users.cuda()]
+                    for idx, user_id in enumerate(users):
+                        _, rank = self.gate.inference(user_id.unsqueeze(0), rec_desc_latent[[idx]] )
                         actual.append( user2product[user_id.item()] )
                         predicted.append(rank.cpu().numpy())
 
@@ -254,6 +265,7 @@ class TemplateTrainer():
                         desc_outputs, tmp_outputs,
                         max_length=target.shape[1])
 
+
                 non_empty_users = (batch['users'] != -1) & (batch['prods'] != -1)
                 if non_empty_users.sum() > 0:
                     prods = batch['prods'][non_empty_users]
@@ -262,23 +274,19 @@ class TemplateTrainer():
                     users, prods = users.cuda(), prods.cuda()
 
                     user_embed = self.model.user_embedding( users )
-                    prod_embed  = self.prod_embeddings( prods )
-                    prediction = (user_embed*prod_embed).sum(1)
+                    rec_desc_latent = desc_latent[non_empty_users.cuda() ]
+                    prediction = self.gate(users, prods, rec_desc_latent.detach() )
 
                     rating = torch.ones(prediction.shape).float().cuda()
-                    # n_rating = (torch.randn(prediction.shape)*0.01 + torch.zeros(prediction.shape)).float().cuda() 
-
-                    # n_prod_embed  = self.prod_embeddings( neg_prods )
-                    # neg_prediction = (user_embed*n_prod_embed).sum(1)
-
-                    mf_loss_ = self.mse_criterion(prediction, rating) #+ self.mse_criterion(neg_prediction, n_rating)
+                    mf_loss_ = self.mse_criterion(prediction.unsqueeze(-1), rating.unsqueeze(-1))
+                    # mf_loss_ = self.bce_criterion(prediction.unsqueeze(-1), rating.unsqueeze(-1))
                     mf_loss += mf_loss_.item() 
                     mf_cnt += 1
 
                     prediction = self.title_rec( prods,  target[ non_empty_users.cuda() ])
                     # n_prediction = self.title_rec( neg_prods,  target[ non_empty_users.cuda() ])
-
-                    tmf_loss += (self.mse_criterion( prediction, rating ).item() )
+                    # tmf_loss += (self.bce_criterion( prediction.unsqueeze(-1), rating.unsqueeze(-1) ).item() )
+                    tmf_loss += (self.mse_criterion( prediction.unsqueeze(-1), rating.unsqueeze(-1) ).item() )
 
 
                 # output_title = torch.argmax(output_logits, dim=-1)
@@ -297,7 +305,9 @@ class TemplateTrainer():
                             break
                         sentence.append(  self.valid_dataset.tokenizer.idx2word[token.item()])
                     sentences.append(sentence)
+
                     for key, weights in scores_weights.items():
+                        # print([reference], sentence)
                         scores[key] += sentence_bleu([reference], sentence, weights, 
                             smoothing_function=smoothing_function)
 
@@ -358,7 +368,6 @@ class TemplateTrainer():
         self.temp = self.args.kl_weight
         self.gumbel_temp = np.minimum(self.args.gumbel_max - (self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i)), 0.00005)
 
-
         nll_loss, kl_loss = self.model.cycle_template(tmp[:, :-1], tmp[:, 1:], temperature=self.gumbel_temp)
         self.tmp_opt.zero_grad()
 
@@ -382,32 +391,33 @@ class TemplateTrainer():
         mf_loss = 0
         tmf_loss = 0
         if non_empty_users.sum() > 0:
+            if (i+1) < self.args.gate_warm:
+                self.gate_temp = np.maximum(1.0 - np.exp(-(i+1 )/ self.args.gate_warm ) , 0.00005)
+            else:
+                self.gate_temp = 1.0
+
             prods = batch['prods'][non_empty_users]
             users = batch['users'][non_empty_users]
             neg_prods = batch['neg_prods'][non_empty_users]
             neg_prods = neg_prods.cuda()
             users, prods = users.cuda(), prods.cuda()
+            rec_desc_latent = desc_latent[ non_empty_users.cuda() ].detach()
 
             # print(users.max(), prods.max(), prods.min(), users.min())
             self.rec_opt.zero_grad()
 
-            user_embed = self.model.user_embedding( users )
-            prod_embed  = self.prod_embeddings( prods )
-            prediction = (user_embed*prod_embed).sum(1)
+            prediction = self.gate(users, prods, rec_desc_latent, temperature=self.gate_temp)
             rating = torch.ones(prediction.shape).float().cuda()
 
             rating = torch.ones(prediction.shape).float().cuda()
             n_rating = (torch.randn(prediction.shape)*0.01 + torch.zeros(prediction.shape)).float().cuda() 
 
-            n_prod_embed  = self.prod_embeddings( neg_prods )
-            neg_prediction = (user_embed*n_prod_embed).sum(1)
+            neg_prediction = self.gate(users, neg_prods, rec_desc_latent, temperature=self.gate_temp)
 
-            mf_loss_ = self.mse_criterion(prediction, rating) + self.mse_criterion(neg_prediction, n_rating)
+            mf_loss_ = 10*self.mse_criterion(prediction.unsqueeze(-1), rating.unsqueeze(-1)) + self.mse_criterion(neg_prediction.unsqueeze(-1), n_rating.unsqueeze(-1))
+            # mf_loss_ = self.bce_criterion(prediction.unsqueeze(-1), rating.unsqueeze(-1)) + self.bce_criterion(neg_prediction.unsqueeze(-1), n_rating.unsqueeze(-1))
             L2_reg = torch.tensor(0., requires_grad=True).cuda()
-            for name, param in self.prod_embeddings.named_parameters():
-                if 'weight' in name:
-                    L2_reg = L2_reg + torch.norm(param, 2).cuda()
-            for name, param in self.model.user_embedding.named_parameters():
+            for name, param in self.gate.named_parameters():
                 if 'weight' in name:
                     L2_reg = L2_reg + torch.norm(param, 2).cuda()
 
@@ -421,7 +431,8 @@ class TemplateTrainer():
             self.dis_opt.zero_grad()
             prediction = self.title_rec( prods,  target[ non_empty_users.cuda() ])
             n_prediction = self.title_rec( neg_prods,  target[ non_empty_users.cuda() ])
-            tmf_loss_ = self.mse_criterion( prediction, rating ) + self.mse_criterion(n_prediction, n_rating)
+            tmf_loss_ = 10*self.mse_criterion( prediction.unsqueeze(-1), rating.unsqueeze(-1) ) + self.mse_criterion(n_prediction.unsqueeze(-1), n_rating.unsqueeze(-1))
+            # tmf_loss_ = self.bce_criterion( prediction.unsqueeze(-1), rating.unsqueeze(-1) ) + self.bce_criterion(n_prediction.unsqueeze(-1), n_rating.unsqueeze(-1))
             tmf_loss_.backward()
             self.dis_opt.step()
             tmf_loss = tmf_loss_.item()
@@ -455,6 +466,8 @@ class TemplateTrainer():
         i = 0
         self.temp = self.args.kl_weight
         self.gumbel_temp = np.minimum(self.args.gumbel_max - (self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i)), 0.00005)
+
+        self.gate_temp = 0
         prev_mf_loss = 0
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
@@ -479,6 +492,8 @@ class TemplateTrainer():
                     }
                     for key, value in loss_val.items():
                         writer.add_scalar('G/'+key, value, i)
+                    writer.add_scalar('temp/gate', self.gate_temp, i)
+                    writer.add_scalar('temp/gumbel', self.gumbel_temp, i)
 
                 if i % self.args.bleu_iter == 0:
                     self.model.eval()
@@ -486,16 +501,16 @@ class TemplateTrainer():
                     self.model.train()
 
                 if i % 100 == 0:
-                    self.model.eval(), self.prod_embeddings.eval(), self.title_rec.eval()
+                    self.model.eval(), self.gate.eval(), self.title_rec.eval()
                     self.sample_results(writer, i)
-                    self.model.train(), self.prod_embeddings.train(), self.title_rec.train()
+                    self.model.train(), self.gate.train(), self.title_rec.train()
                     # self.gumbel_temp = np.maximum(self.args.gumbel_max ** (self.gumbel_anneal_rate * i), 0.00005)
 
                 if i % args.check_iter == 0:
                     torch.save({
                         'model': self.model.state_dict(),
                         'title_rec': self.title_rec.state_dict(),
-                        'prod_embeddings': self.prod_embeddings.state_dict(),
+                        'prod_embeddings': self.gate.state_dict(),
                     }, os.path.join(save_path,'checkpoint_{}.pt'.format(i)))
 
                     torch.save({
@@ -527,7 +542,7 @@ if __name__ == "__main__":
     parser.add_argument('--dis-steps', type=int, default=1)
     parser.add_argument('--tokenize', '-t', type=str, default='word', choices=['word', 'char'])
 
-    parser.add_argument('--name', type=str, default='rec')
+    parser.add_argument('--name', type=str, default='gate')
 
     parser.add_argument('--tmp-latent-dim', type=int, default=16)
     parser.add_argument('--tmp-cat-dim', type=int, default=10)
@@ -563,6 +578,7 @@ if __name__ == "__main__":
                         default=False, help='Update latent assignment every epoch?')
     parser.add_argument('-ckpt','--checkpoint', type=str,
                         default='', help='Update latent assignment every epoch?')
+    parser.add_argument('--gate-warm', type=int, default=5000)
 
     # parser.add_argument('--dis-weight', type=float, default=0.1)
     parser.add_argument('--kl-weight', type=float, default=1.0)
@@ -577,11 +593,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     trainer = TemplateTrainer(args)
-    # trainer.pretrain(5)
+
     # trainer.sample_results(None)
     # trainer.step(1)
-    # trainer.calculate_bleu(None, size=1000)
+    # trainer.calculate_bleu(None, size=1000, smoothing_function=SmoothingFunction().method3)
     # trainer.test()
+
     if args.evaluate:
         trainer.evaluate(args.checkpoint)
     else:

@@ -204,7 +204,6 @@ class KKDayUser(Dataset):
             self.prod2id = cache['prod2id']
             self.user2id = cache['user2id']
             self.users_pid = cache['users_pid']
-
         else:
             self.data = []
             self.user2id = {}
@@ -357,6 +356,7 @@ class TemPest(Dataset):
         max_length=-1, is_train=True,force_fix_len=False, token_level='word'):
         self.max_length = max_length
         assert data_type in ['train', 'valid', 'test']
+        print(os.path.join(cache_path, data_type+'.pt'))
         self.data_pt = torch.load(os.path.join(cache_path, data_type+'.pt'))
         self.neg_user2prod_mapping = torch.load(os.path.join(cache_path, 'id_mapping.pt'))['neg_user2product']
 
