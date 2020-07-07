@@ -81,10 +81,11 @@ class TemplateTrainer():
         self.init_sample_inputs()
 
     def evaluate(self, checkpoint_name):
-        self.save_path = './'
+        self.save_path = os.path.dirname(os.path.abspath(checkpoint_name))
         checkpoint = torch.load(checkpoint_name)
-        self.model.eval()
+        self.model.eval(), self.prod_embeddings.eval()
         self.model.load_state_dict(checkpoint['model'])
+        self.prod_embeddings.load_state_dict(checkpoint['prod_embeddings'])
         scores = self.calculate_bleu(None, size=100000, smoothing_function=SmoothingFunction().method3)
         with open('results.txt', 'a') as f:
             f.write('--------------------------------\n')

@@ -1,38 +1,26 @@
 import requests
 from tqdm import tqdm
 import json
+from NLP_tools import rouge, bleu
 
-def ner_requests(text):
-    res = requests.get('https://voidful.tech/zhner', params={
-        'input': text
-    })
-    return res.json()
+bleu = bleu.BLEU()
+rouge = rouge.Rouge()
 
-if __name__ == "__main__":
-    g = open('ner_example.jsonl', 'a')
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Evaluate tools')
+    parser.add_argument('-r','--ref', type=str)
+    parser.add_argument('-g','--gen', type=str)
 
-    with open('data/kkday_dataset/train_title.txt', 'r') as f, open('data/kkday_dataset/train_template_voidful.txt', 'w') as tmp:
-        for line in tqdm(f.readlines()):
-            line = line.strip()
-            output = ner_requests(line)
-            if 'result' in output:
-                tokens = line.split(' ')
-                cleaned = []
-                ners = [e[0] for e in output['result']] 
-                for t in tokens:
-                    found = 0
-                    for n in ners:
-                        if t in n or n in t:
-                            found = 1
-                            break
+    args = parser.parse_args()
+    ref_file = args.ref
+    system_file = args.gen
+    rouge.print_score(ref_file, system_file)
 
-                    if found == 1:
-                        cleaned.append('##')
-                    else:
-                        cleaned.append(t)
-                tmp.write(' '.join(cleaned)+'\n')
-                g.write(json.dumps({'input': line, 'output': output['result']})+'\n')
+    # for complete version of rouge score
+    rouge.print_all(ref_file, system_file)
 
-            else:
-                tmp.write('\n')
-    g.close()
+    # for bleu score
+    # None, sm1~sm7 denotes smoothing function type
+    bleu.print_score(ref_file, system_file, "sm3")
+    bleu.print_score(ref_file, system_file, "sm5")
