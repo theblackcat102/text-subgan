@@ -82,11 +82,13 @@ class TemplateTrainer():
 
     def evaluate(self, checkpoint_name):
         self.save_path = os.path.dirname(os.path.abspath(checkpoint_name))
+        step = int(os.path.basename(checkpoint_name).split('_')[-1].replace('.pt',''))
+
         checkpoint = torch.load(checkpoint_name)
         self.model.eval(), self.prod_embeddings.eval()
         self.model.load_state_dict(checkpoint['model'])
         self.prod_embeddings.load_state_dict(checkpoint['prod_embeddings'])
-        scores = self.calculate_bleu(None, size=100000, smoothing_function=SmoothingFunction().method3)
+        scores = self.calculate_bleu(None, step=step, size=100000, smoothing_function=SmoothingFunction().method3)
         with open('results.txt', 'a') as f:
             f.write('--------------------------------\n')
             f.write('checkpoint : {}\n'.format(checkpoint_name))
@@ -96,7 +98,7 @@ class TemplateTrainer():
             for key, value in scores.items():
                 f.write('|BLEU-{:<5}| {:>5.3f}|\n'.format(key, value))
 
-        scores = self.calculate_bleu(None, size=100000, smoothing_function=SmoothingFunction().method5)
+        scores = self.calculate_bleu(None, step=step, size=100000, smoothing_function=SmoothingFunction().method5)
         with open('results.txt', 'a') as f:
             f.write('filter method 5\n')
             f.write('|  BLEU  |  score   |\n')
@@ -304,12 +306,19 @@ class TemplateTrainer():
                 if len(sentences) > size:
                     break
         # print('bleu eval end : ', time()-start_t)
+        ref_name = '{}_reference.txt'.format(0)
+        gen_name = '{}_generate.txt'.format(step)
 
-        with open(os.path.join(self.save_path, '{}_reference.txt'.format(0)), 'w') as f:
+        if self.args.evaluate:
+
+            ref_name = 'eval_{}_reference.txt'.format(step)
+            gen_name = 'eval_{}_generate.txt'.format(step)
+
+        with open(os.path.join(self.save_path, ref_name), 'w') as f:
             for sent in references:
                 f.write(' '.join(sent)+'\n')
 
-        with open(os.path.join(self.save_path, '{}_generate.txt'.format(step)), 'w') as f:
+        with open(os.path.join(self.save_path, gen_name), 'w') as f:
             for sent in sentences:
                 f.write(' '.join(sent)+'\n')
 
