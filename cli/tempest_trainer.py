@@ -39,15 +39,15 @@ class TemplateTrainer():
         self.args = args
         #                                                  reduce memory load
         self.train_dataset = TemPest(args.cache_path, 'valid' if args.evaluate else 'train')
-        self.valid_dataset = TemPest(args.cache_path, 'valid')
+        self.valid_dataset = TemPest(args.cache_path, 'test' if args.evaluate else 'valid')
         self.id_mapping = torch.load(os.path.join(args.cache_path, 'id_mapping.pt'))
         user_size = len(self.id_mapping['user2id'])
         self.user_size = user_size
         self.prod_size = len(self.id_mapping['prod2id'])
+        vocab_size = self.valid_dataset.vocab_size
+        self.args.vocab_size = vocab_size
 
-        self.args.vocab_size = self.train_dataset.vocab_size
-
-        self.model = VMT(args.gen_embed_dim, self.train_dataset.vocab_size,
+        self.model = VMT(args.gen_embed_dim, vocab_size,
             enc_hidden_size=500, dec_hidden_size=500, tmp_category=args.tmp_cat_dim,
             tmp_latent_dim=args.tmp_latent_dim, desc_latent_dim=args.desc_latent_dim, user_latent_dim=args.user_latent_dim,
             biset=args.biset, user_embedding=True, user_size=user_size,
@@ -64,7 +64,7 @@ class TemplateTrainer():
         self.rec_opt = optim.Adam(list(self.model.user_embedding.parameters()) + list(self.prod_embeddings.parameters()), 
             args.rec_lr, weight_decay=1e-5 )
 
-        self.title_rec = SimpleMF( self.prod_size+1, self.train_dataset.vocab_size, user_embedding=self.prod_embeddings, n_factors=args.user_latent_dim).cuda()
+        self.title_rec = SimpleMF( self.prod_size+1, vocab_size, user_embedding=self.prod_embeddings, n_factors=args.user_latent_dim).cuda()
         self.dis_opt = AdamW(self.title_rec.parameters(), lr=args.dis_lr, weight_decay=1e-5)
 
         self.mle_criterion = nn.NLLLoss(ignore_index=Constants.PAD)
@@ -135,7 +135,6 @@ class TemplateTrainer():
 
                 f.write('NDCG@5 {:>10.3f}\n'.format(ndcg_k(actual, predicted, 5)))
                 f.write('NDCG@10 {:>10.3f}\n'.format(ndcg_k(actual, predicted, 10)))
-
 
     def init_sample_inputs(self):
         batch = next(self.train_iter)
