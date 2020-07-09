@@ -1,5 +1,11 @@
 # text-subgan
 
+0. Setup
+
+```
+pip install -r requirements.txt
+```
+
 1. Preprocess and save data
 
 ```

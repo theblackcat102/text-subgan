@@ -1,10 +1,10 @@
 import requests
 from tqdm import tqdm
 import json
-from NLP_tools import rouge, bleu
+from nlp_tools import Rouge, BLEU
 
-bleu = bleu.BLEU()
-rouge = rouge.Rouge()
+bleu = BLEU()
+rouge = Rouge()
 
 if __name__ == '__main__':
     import argparse

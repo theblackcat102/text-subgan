@@ -136,3 +136,97 @@ Rouge-L Average_P: 9.242 (95-conf.int. 7.969 - 10.516)
 S_FUNC: sm3, BLEU-ALL: 3.921, BLEU-1: 21.178, BLEU-2: 4.131, BLEU-3: 2.341, BLEU-4: 1.356
 ------------------------------------------
 S_FUNC: sm5, BLEU-ALL: 8.186, BLEU-1: 42.504, BLEU-2: 14.183, BLEU-3: 4.728, BLEU-4: 1.576
+
+--------------------------------
+checkpoint : save/tempest_rec-mf-final-2020-07-07-16-44-58/checkpoint_99000.pt
+filter method 3
+|  BLEU  |  score   |
+|--------|----------|
+|BLEU-1    | 0.333|
+|BLEU-2    | 0.230|
+|BLEU-3    | 0.184|
+|BLEU-4    | 0.153|
+filter method 5
+|  BLEU  |  score   |
+|--------|----------|
+|BLEU-1    | 0.524|
+|BLEU-2    | 0.374|
+|BLEU-3    | 0.270|
+|BLEU-4    | 0.200|
+Recommendation Performance: 
+Recall@5      0.121
+Recall@10      0.169
+Precision@5      0.241
+Precision@10      0.172
+NDCG@5      0.276
+NDCG@10      0.216
+
+Samples: 1760
+rouge-1 F1(R/P): 47.79 (47.62/48.63)
+rouge-2 F1(R/P): 4.95 (4.98/5.07)
+rouge-L F1(R/P): 9.67 (9.49/10.51)
+Sample #: 1760
+------------------------------------------
+Rouge-1 Average_F: 47.790 (95-conf.int. 45.514 - 50.066)
+Rouge-1 Average_R: 47.616 (95-conf.int. 45.335 - 49.896)
+Rouge-1 Average_P: 48.631 (95-conf.int. 46.331 - 50.931)
+------------------------------------------
+Rouge-2 Average_F: 4.948 (95-conf.int. 3.975 - 5.921)
+Rouge-2 Average_R: 4.979 (95-conf.int. 3.997 - 5.961)
+Rouge-2 Average_P: 5.066 (95-conf.int. 4.073 - 6.059)
+------------------------------------------
+Rouge-L Average_F: 9.669 (95-conf.int. 8.392 - 10.946)
+Rouge-L Average_R: 9.491 (95-conf.int. 8.217 - 10.764)
+Rouge-L Average_P: 10.511 (95-conf.int. 9.139 - 11.883)
+------------------------------------------
+------------------------------------------
+S_FUNC: sm3, BLEU-ALL: 3.997, BLEU-1: 22.198, BLEU-2: 4.181, BLEU-3: 2.353, BLEU-4: 1.365
+------------------------------------------
+S_FUNC: sm5, BLEU-ALL: 8.474, BLEU-1: 43.997, BLEU-2: 14.682, BLEU-3: 4.894, BLEU-4: 1.631
+--------------------------------
+
+checkpoint : save/tempest_rec-mf-final-2020-07-08-12-42-37/checkpoint_99000.pt
+filter method 3
+|  BLEU  |  score   |
+|--------|----------|
+|BLEU-1    | 0.325|
+|BLEU-2    | 0.224|
+|BLEU-3    | 0.178|
+|BLEU-4    | 0.149|
+filter method 5
+|  BLEU  |  score   |
+|--------|----------|
+|BLEU-1    | 0.506|
+|BLEU-2    | 0.360|
+|BLEU-3    | 0.259|
+|BLEU-4    | 0.192|
+Recommendation Performance: 
+Recall@5      0.113
+Recall@10      0.163
+Precision@5      0.233
+Precision@10      0.173
+NDCG@5      0.264
+NDCG@10      0.211
+Samples: 1760
+rouge-1 F1(R/P): 45.79 (45.62/46.73)
+rouge-2 F1(R/P): 4.90 (4.91/5.02)
+rouge-L F1(R/P): 10.03 (9.85/10.97)
+
+Sample #: 1760
+------------------------------------------
+Rouge-1 Average_F: 45.788 (95-conf.int. 43.523 - 48.054)
+Rouge-1 Average_R: 45.615 (95-conf.int. 43.343 - 47.888)
+Rouge-1 Average_P: 46.732 (95-conf.int. 44.442 - 49.022)
+------------------------------------------
+Rouge-2 Average_F: 4.898 (95-conf.int. 3.925 - 5.871)
+Rouge-2 Average_R: 4.910 (95-conf.int. 3.931 - 5.889)
+Rouge-2 Average_P: 5.016 (95-conf.int. 4.023 - 6.009)
+------------------------------------------
+Rouge-L Average_F: 10.027 (95-conf.int. 8.733 - 11.321)
+Rouge-L Average_R: 9.848 (95-conf.int. 8.553 - 11.143)
+Rouge-L Average_P: 10.974 (95-conf.int. 9.583 - 12.366)
+------------------------------------------
+------------------------------------------
+S_FUNC: sm3, BLEU-ALL: 4.035, BLEU-1: 21.848, BLEU-2: 4.256, BLEU-3: 2.402, BLEU-4: 1.402
+------------------------------------------
+S_FUNC: sm5, BLEU-ALL: 8.376, BLEU-1: 43.498, BLEU-2: 14.511, BLEU-3: 4.837, BLEU-4: 1.612
