@@ -357,7 +357,7 @@ class TemplateTrainer():
             users_filled = users_filled.cuda()
 
         desc_outputs, desc_latent, desc_mean, desc_std = self.model.encode_desc(src_inputs)
-        tmp_outputs, tmp_latent = self.model.encode_tmp(tmp)
+        tmp_outputs, tmp_latent = self.model.encode_tmp(tmp[:, :-1], temperature=self.gumbel_temp)
 
         user_embeddings = self.model.user_embedding( users_filled )
         output_target, output_logits = self.model.decode(tmp_latent, desc_latent, user_embeddings, 
@@ -365,7 +365,6 @@ class TemplateTrainer():
                 max_length=target.shape[1])
 
         self.temp = self.args.kl_weight
-        self.gumbel_temp = np.minimum(self.args.gumbel_max - (self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i)), 0.00005)
 
 
         nll_loss, kl_loss = self.model.cycle_template(tmp[:, :-1], tmp[:, 1:], temperature=self.gumbel_temp)
@@ -463,7 +462,8 @@ class TemplateTrainer():
 
         i = 0
         self.temp = self.args.kl_weight
-        self.gumbel_temp = np.minimum(self.args.gumbel_max - (self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i)), 0.00005)
+        self.gumbel_temp = 1.0
+        # self.gumbel_temp = np.minimum(self.args.gumbel_max - (self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i)), 0.5)
         prev_mf_loss = 0
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
@@ -488,6 +488,7 @@ class TemplateTrainer():
                     }
                     for key, value in loss_val.items():
                         writer.add_scalar('G/'+key, value, i)
+                    writer.add_scalar('temp/gumbel', self.gumbel_temp, i)
 
                 if i % self.args.bleu_iter == 0:
                     self.model.eval()
@@ -498,6 +499,7 @@ class TemplateTrainer():
                     self.model.eval(), self.prod_embeddings.eval(), self.title_rec.eval()
                     self.sample_results(writer, i)
                     self.model.train(), self.prod_embeddings.train(), self.title_rec.train()
+                    self.gumbel_temp = np.maximum(self.gumbel_temp * np.exp(-0.00003 * i), 0.5)
                     # self.gumbel_temp = np.maximum(self.args.gumbel_max ** (self.gumbel_anneal_rate * i), 0.00005)
 
                 if i % args.check_iter == 0:

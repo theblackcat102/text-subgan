@@ -25,7 +25,7 @@ python preprocess2.py  \
 2. Train model
 
 ```
-python -m cli.tempest_trainer --batch-size 48 --iterations 100000 --biset True --name biset
+python -m cli.tempest_trainer --batch-size 48 --iterations 100000
 
 python -m cli.tempest_gate_trainer --batch-size 48 --iterations 100000 --name rec-gate-mf
 ```

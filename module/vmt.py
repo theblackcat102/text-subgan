@@ -181,10 +181,10 @@ class VMT(nn.Module):
         outputs, hidden, mean, std = self.content_encoder(desc,  device=device)
         return outputs, hidden, mean, std
 
-    def encode_tmp(self, template, device='cpu'):
+    def encode_tmp(self, template, temperature=1,device='cpu'):
         if self.gpu:
             device = 'cuda'
-        encoder_output, latent = self.template_vae.encode(template, device=device)
+        encoder_output, latent, _ = self.template_vae.encode(template, device=device, temperature=temperature)
         return encoder_output, latent
 
     def decode(self, tmp_latent, desc_latent, user_feature, desc_outputs, tmp_outputs, max_length, device='cpu', temperature=1, gumbel=False):
@@ -209,11 +209,10 @@ if __name__ == "__main__":
         user_latent_dim=32,
         gpu=False, biset=True).cuda()
 
-    desc_outputs, desc_latent, mean, std = vmt.encode_desc(inputs, 'cuda')
+    desc_outputs, desc_latent, mean, std = vmt.encode_desc(inputs, device='cuda')
     print('description: ',desc_latent.shape)
-    outputs, tmp_latent = vmt.encode_tmp(inputs, 'cuda')
+    outputs, tmp_latent = vmt.encode_tmp(inputs, device='cuda')
     print('template: ',tmp_latent.shape)
-
     output_feat = vmt.decode(tmp_latent, desc_latent, user_feat, desc_outputs, outputs, 
         max_length=32, device='cuda')
 

@@ -72,10 +72,13 @@ class VAE_Gumbel(nn.Module):
         )
         self.log_softmax = nn.LogSoftmax(dim=-1)
 
-    def encode(self, inputs, device='cuda'):
+    def encode(self, inputs, device='cuda', temperature=1, st_mode=False):
         inputs = self.embedding(inputs)
         output, hidden = self.encoder(inputs)
-        return output, self.hidden2latent(hidden)
+        latent = self.hidden2latent(hidden)
+        latent_y = latent.view(latent.size(0), self.latent_dim, self.categorical_dim)
+        z = gumbel_softmax(latent_y, temperature, st_mode, device=device).view(-1, self.latent_dim * self.categorical_dim)
+        return output, z, latent
 
     def decode(self, latent, max_length, device='cuda'):
         # [B x 1]
@@ -110,10 +113,10 @@ class VAE_Gumbel(nn.Module):
     
 
     def forward(self, inputs, max_length, temperature=1, st_mode=False, device='cuda'):
-        encoder_output, latent = self.encode(inputs, device=device)
+        encoder_output, z, latent = self.encode(inputs, device=device, 
+            st_mode=st_mode, temperature=temperature)
+        decoder_output, inp = self.decode(z, max_length, device=device)
         latent_y = latent.view(latent.size(0), self.latent_dim, self.categorical_dim)
-        z = gumbel_softmax(latent_y, temperature, st_mode, device=device).view(-1, self.latent_dim * self.categorical_dim)
-        decoder_output, inp = self.decode(latent_y.view(-1, self.latent_dim * self.categorical_dim), max_length, device=device)
         return decoder_output, F.softmax(latent_y, dim=-1).reshape(*latent.size()), inp
 
 
