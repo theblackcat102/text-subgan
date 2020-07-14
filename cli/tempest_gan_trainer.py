@@ -198,7 +198,35 @@ class TemplateTrainer():
 
         if writer != None:
             writer.add_text("Text", samples, step)
-            writer.flush() 
+            writer.flush()
+
+        output_target, output_title = self.model.decode(tmp_latent[ list(range(len(tmp_latent)-1, -1, -1)) ], desc_latent, user_embeddings, 
+                desc_outputs, tmp_outputs,
+                max_length=self.target_.shape[1])
+
+        # output_title = torch.argmax(output1_logits, dim=-1)
+        # output_title2 = torch.argmax(output2_logits, dim=-1)
+        samples, new_sample = '', ''
+        with torch.no_grad():
+            for idx, sent in enumerate(output_title):
+
+                sentence = []
+                for token in self.tmt_[idx][1:]:
+                    if token.item() == Constants.EOS:
+                        break
+                    sentence.append(  self.valid_dataset.tokenizer.idx2word[token.item()])
+                samples += str(idx) + '. [tmp]: ' +' '.join(sentence) + '\n\n'
+
+                sentence = []
+                for token in sent:
+                    if token.item() == Constants.EOS:
+                        break
+                    sentence.append(  self.valid_dataset.tokenizer.idx2word[token.item()])
+                samples += '       [out]: ' +' '.join(sentence[:30]) + '\n\n'
+
+        if writer != None:
+            writer.add_text("reverse", samples, step)
+            writer.flush()
 
     def calculate_bleu(self, writer, step=0, size=2000, ngram=4, smoothing_function=SmoothingFunction().method3):
         eval_dataloader = torch.utils.data.DataLoader(self.valid_dataset, num_workers=8,
@@ -485,28 +513,36 @@ class TemplateTrainer():
         D_fake2 = self.discriminator(fake_target2.detach()).mean()
         D_real2 = self.discriminator(target2, is_discrete=True).mean()
 
-        D_loss = -self.args.dis_weight * ((D_real1 - D_fake1) + (D_real2 - D_fake2))
+        D_loss = self.args.dis_weight * ((D_fake1 - D_real1) + (D_fake2-D_real2)) / 2
 
         self.dis_opt.zero_grad()
         D_loss.backward()
         self.dis_opt.step()
 
-        G_wgan1 = -self.discriminator(fake_target1).mean()
-        G_wgan2 = -self.discriminator(fake_target2).mean()
-        G_wgan = self.args.gen_weight * (G_wgan1 + G_wgan2) / 2
+        if i % 5 == 0:
+            G_wgan1 = -self.discriminator(fake_target1).mean()
+            G_wgan2 = -self.discriminator(fake_target2).mean()
+            G_wgan = self.args.gen_weight * (G_wgan1 + G_wgan2) / 2
 
-        self.gen_opt.zero_grad()
-        G_wgan.backward()
-        self.gen_opt.step()
+            self.gen_opt.zero_grad()
+            G_wgan.backward()
+            self.gen_opt.step()
+
+            return {
+                'GAN/g_loss': G_wgan.item(),
+                'GAN/g_wgan1': G_wgan1.item(),
+                'GAN/g_wgan2': G_wgan2.item(),
+                'GAN/d_loss': D_loss.item(),
+                'GAN/d_fake': D_fake1.item()+D_fake2.item(),
+                'GAN/d_real': D_real1.item()+D_real2.item(),
+            }
 
         return {
-            'GAN/g_loss': G_wgan.item(),
-            'GAN/g_wgan1': G_wgan1.item(),
-            'GAN/g_wgan2': G_wgan2.item(),
             'GAN/d_loss': D_loss.item(),
             'GAN/d_fake': D_fake1.item()+D_fake2.item(),
             'GAN/d_real': D_real1.item()+D_real2.item(),
         }
+        
 
 
     def train(self):
@@ -652,8 +688,8 @@ if __name__ == "__main__":
     parser.add_argument('--text-lr', type=float, default=0.001)
     parser.add_argument('--rec-lr', type=float, default=0.001)
     parser.add_argument('--trec-lr', type=float, default=0.001)
-    parser.add_argument('--gen-lr', type=float, default=0.0001)
-    parser.add_argument('--dis-lr', type=float, default=0.0005)
+    parser.add_argument('--gen-lr', type=float, default=0.00001)
+    parser.add_argument('--dis-lr', type=float, default=0.00001)
 
 
     parser.add_argument('--grad-penalty', type=str2bool, nargs='?',
@@ -669,8 +705,8 @@ if __name__ == "__main__":
     parser.add_argument('-ckpt','--checkpoint', type=str,
                         default='', help='Update latent assignment every epoch?')
 
-    parser.add_argument('--dis-weight', type=float, default=0.1)
-    parser.add_argument('--gen-weight', type=float, default=0.1)
+    parser.add_argument('--dis-weight', type=float, default=1)
+    parser.add_argument('--gen-weight', type=float, default=1)
     parser.add_argument('--kl-weight', type=float, default=1.0)
     parser.add_argument('--l2-weight', type=float, default=1e-3)
     # parser.add_argument('--opt-level', type=str, default='O1')
