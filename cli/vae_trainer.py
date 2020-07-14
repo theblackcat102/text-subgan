@@ -8,7 +8,7 @@ import config as cfg
 
 from module.relgan_d import RelSeqGAN_D
 from module.cluster import VAE_Cluster
-from module.vmt import VMT
+from module.temp_vmt import VMT
 from module.vae import GaussianKLLoss
 from dataset import KKDayUser, seq_collate
 from constant import Constants

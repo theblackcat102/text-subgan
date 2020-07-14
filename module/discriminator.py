@@ -194,20 +194,21 @@ class CNNClassifier(CNNDiscriminator):
         return logits
 
 
-class CNNClassifier(nn.Module):
-    def __init__(self, vocab_size, embedding_dim, max_length):
-        super(CNNCritic, self).__init__()
+class CNNClassifierModel(nn.Module):
+    def __init__(self, vocab_size, embedding_dim, max_length, k_label=1):
+        super(CNNClassifierModel, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.block = nn.Sequential(
             ResBlock(embedding_dim),
             ResBlock(embedding_dim),
             ResBlock(embedding_dim),
             ResBlock(embedding_dim),
-            ResBlock(embedding_dim),
         )
-        self.maxpool = nn.MaxPool1d(max_length)
-        self.linear = nn.Linear(embedding_dim, 1)
-        self.sigmoid = nn.Sigmoid()
+        self.maxpool = nn.AdaptiveMaxPool1d(1)
+        self.linear = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, k_label)
+        )
 
     def forward(self, inputs, is_discrete=False):
         """
@@ -223,9 +224,8 @@ class CNNClassifier(nn.Module):
         inputs = inputs.transpose(1, 2)     # (B, H, T)
         outputs = self.block(inputs)        # (B, H, T)
         outputs = self.maxpool(outputs)     # (B, H, 1)
-        outputs = outputs.squeeze(-1)       # (B, H)
+        outputs = outputs.squeeze(-1)
         outputs = self.linear(outputs)      # (B, 1)
-        outputs = self.sigmoid(outputs)
         return outputs
 
 

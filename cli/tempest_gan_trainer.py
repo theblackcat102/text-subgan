@@ -7,6 +7,7 @@ import os, glob, json
 import config as cfg
 
 from module.vmt import VMT
+from module.discriminator import CNNClassifierModel
 from module.recommend import SimpleMF
 from module.vae import GaussianKLLoss
 from module.optimizer import AdamW
@@ -48,10 +49,12 @@ class TemplateTrainer():
         self.args.vocab_size = vocab_size
 
         self.model = VMT(args.gen_embed_dim, vocab_size,
-            enc_hidden_size=500, dec_hidden_size=500, tmp_category=args.tmp_cat_dim,
+            enc_hidden_size=256, dec_hidden_size=256, tmp_category=args.tmp_cat_dim,
             tmp_latent_dim=args.tmp_latent_dim, desc_latent_dim=args.desc_latent_dim, user_latent_dim=args.user_latent_dim,
             biset=args.biset, user_embedding=True, user_size=user_size,
             max_seq_len=args.max_seq_len-1, gpu=True).cuda()
+
+        self.discriminator = CNNClassifierModel(vocab_size, 32, args.max_seq_len-1, 1).cuda()
 
         self.train_iter = data_iter(torch.utils.data.DataLoader(self.train_dataset, num_workers=3,
                         collate_fn=tempest_collate, batch_size=args.batch_size, shuffle=True, 
@@ -59,13 +62,17 @@ class TemplateTrainer():
         self.prod_embeddings = nn.Embedding(self.prod_size+1, args.user_latent_dim).cuda()
         torch.nn.init.xavier_uniform_(self.prod_embeddings.weight)
 
-        self.gen_opt = optim.Adam(self.model.parameters(), lr=args.gen_lr)
-        self.tmp_opt = optim.Adam(self.model.template_vae.parameters(), lr=args.gen_lr)
+
+        self.gen_opt = optim.Adam(self.model.title_decoder.parameters(), lr=args.gen_lr)
+        self.dis_opt = optim.Adam(self.discriminator.parameters(), lr=args.dis_lr)
+
+        self.text_opt = optim.Adam(self.model.parameters(), lr=args.text_lr)
+        self.tmp_opt = optim.Adam(self.model.template_vae.parameters(), lr=args.text_lr)
         self.rec_opt = optim.Adam(list(self.model.user_embedding.parameters()) + list(self.prod_embeddings.parameters()), 
             args.rec_lr, weight_decay=1e-5 )
 
         self.title_rec = SimpleMF( self.prod_size+1, vocab_size, user_embedding=self.prod_embeddings, n_factors=args.user_latent_dim).cuda()
-        self.dis_opt = AdamW(self.title_rec.parameters(), lr=args.dis_lr, weight_decay=1e-5)
+        self.trec_opt = AdamW(self.title_rec.parameters(), lr=args.dis_lr, weight_decay=1e-5)
 
         self.mle_criterion = nn.NLLLoss(ignore_index=Constants.PAD)
         self.KL_loss = GaussianKLLoss()
@@ -73,6 +80,7 @@ class TemplateTrainer():
         self.xent_criterion = nn.CrossEntropyLoss()
 
         self.gumbel_temp = 1.0
+        self.temperature = 1.0
         self.l2 = args.l2_weight
         N = args.iterations
         self.gumbel_anneal_rate = 1 / N
@@ -268,19 +276,19 @@ class TemplateTrainer():
                     prediction = (user_embed*prod_embed).sum(1)
 
                     rating = torch.ones(prediction.shape).float().cuda()
-                    # n_rating = (torch.randn(prediction.shape)*0.01 + torch.zeros(prediction.shape)).float().cuda() 
+                    n_rating = (torch.randn(prediction.shape)*0.01 + torch.zeros(prediction.shape)).float().cuda() 
 
-                    # n_prod_embed  = self.prod_embeddings( neg_prods )
-                    # neg_prediction = (user_embed*n_prod_embed).sum(1)
+                    n_prod_embed  = self.prod_embeddings( neg_prods )
+                    neg_prediction = (user_embed*n_prod_embed).sum(1)
 
-                    mf_loss_ = self.mse_criterion(prediction, rating) #+ self.mse_criterion(neg_prediction, n_rating)
+                    mf_loss_ = self.mse_criterion(prediction, rating) + self.mse_criterion(neg_prediction, n_rating)
                     mf_loss += mf_loss_.item() 
                     mf_cnt += 1
 
                     prediction = self.title_rec( prods,  target[ non_empty_users.cuda() ])
-                    # n_prediction = self.title_rec( neg_prods,  target[ non_empty_users.cuda() ])
+                    n_prediction = self.title_rec( neg_prods,  target[ non_empty_users.cuda() ])
 
-                    tmf_loss += (self.mse_criterion( prediction, rating ).item() )
+                    tmf_loss += (self.mse_criterion( prediction, rating ).item() ) + self.mse_criterion(n_prediction, n_rating)
 
 
                 # output_title = torch.argmax(output_logits, dim=-1)
@@ -366,7 +374,6 @@ class TemplateTrainer():
 
         self.temp = self.args.kl_weight
 
-
         nll_loss, kl_loss = self.model.cycle_template(tmp[:, :-1], tmp[:, 1:], temperature=self.gumbel_temp)
         self.tmp_opt.zero_grad()
 
@@ -375,7 +382,7 @@ class TemplateTrainer():
 
         self.tmp_opt.step()
 
-        self.gen_opt.zero_grad()
+        self.text_opt.zero_grad()
 
         desc_kl_loss = self.KL_loss(desc_mean, desc_std)
         
@@ -384,7 +391,7 @@ class TemplateTrainer():
         total_loss = construct_loss + desc_kl_loss
 
         total_loss.backward()
-        self.gen_opt.step()
+        self.text_opt.step()
 
         non_empty_users = (batch['users'] != -1) & (batch['prods'] != -1)
         mf_loss = 0
@@ -426,15 +433,81 @@ class TemplateTrainer():
 
             mf_loss = mf_loss.item()
 
-            self.dis_opt.zero_grad()
+            self.trec_opt.zero_grad()
             prediction = self.title_rec( prods,  target[ non_empty_users.cuda() ])
             n_prediction = self.title_rec( neg_prods,  target[ non_empty_users.cuda() ])
             tmf_loss_ = self.mse_criterion( prediction, rating ) + self.mse_criterion(n_prediction, n_rating)
             tmf_loss_.backward()
-            self.dis_opt.step()
+            self.trec_opt.step()
             tmf_loss = tmf_loss_.item()
 
         return total_loss.item(), construct_loss.item(), desc_kl_loss.item(), nll_loss.item(), kl_loss.item(), mf_loss, tmf_loss
+
+
+    def sample_latent(self):
+        batch = next(self.train_iter)
+        src_inputs = batch['src']
+        tmp = batch['tmt']
+        inputs, target = batch['tgt'][:, :-1], batch['tgt'][:, 1:]
+        users = batch['users']
+        empty_users = users == -1
+        batch_size = len(empty_users)
+        users_filled = users.detach()
+        users_filled[empty_users] = torch.randint(0, self.user_size, ( int(empty_users.sum()),  ))
+
+        if cfg.CUDA:
+            src_inputs = src_inputs.cuda()
+            target = target.cuda()
+            tmp = tmp.cuda()
+            inputs = inputs.cuda()
+            users_filled = users_filled.cuda()
+
+        desc_outputs, desc_latent, _, _ = self.model.encode_desc(src_inputs)
+        tmp_outputs, tmp_latent = self.model.encode_tmp(tmp[:, :-1], temperature=self.gumbel_temp)
+        user_embeddings = self.model.user_embedding( users_filled )
+        return tmp_latent, desc_latent, user_embeddings, desc_outputs, tmp_outputs, target
+
+
+    def gan_step(self, i):
+        with torch.no_grad():
+            tmp_latent1, desc_latent1, user_embeddings1, desc_outputs1, tmp_outputs1, target1 = self.sample_latent()
+            tmp_latent2, desc_latent2, user_embeddings2, desc_outputs2, tmp_outputs2, target2 = self.sample_latent()
+
+        fake_target1, _, _ = self.model.decode(tmp_latent2, desc_latent1, user_embeddings1,
+                desc_outputs1, tmp_outputs2,
+                max_length=target1.shape[1], gumbel=True, temperature=self.temperature)
+        fake_target2, _, _ = self.model.decode(tmp_latent1, desc_latent2, user_embeddings2, 
+                desc_outputs2, tmp_outputs1,
+                max_length=target2.shape[1], gumbel=True, temperature=self.temperature)
+
+        D_fake1 = self.discriminator(fake_target1.detach()).mean()
+        D_real1 = self.discriminator(target1, is_discrete=True).mean()
+        D_fake2 = self.discriminator(fake_target2.detach()).mean()
+        D_real2 = self.discriminator(target2, is_discrete=True).mean()
+
+        D_loss = -self.args.dis_weight * ((D_real1 - D_fake1) + (D_real2 - D_fake2))
+
+        self.dis_opt.zero_grad()
+        D_loss.backward()
+        self.dis_opt.step()
+
+        G_wgan1 = -self.discriminator(fake_target1).mean()
+        G_wgan2 = -self.discriminator(fake_target2).mean()
+        G_wgan = self.args.gen_weight * (G_wgan1 + G_wgan2) / 2
+
+        self.gen_opt.zero_grad()
+        G_wgan.backward()
+        self.gen_opt.step()
+
+        return {
+            'GAN/g_loss': G_wgan.item(),
+            'GAN/g_wgan1': G_wgan1.item(),
+            'GAN/g_wgan2': G_wgan2.item(),
+            'GAN/d_loss': D_loss.item(),
+            'GAN/d_fake': D_fake1.item()+D_fake2.item(),
+            'GAN/d_real': D_real1.item()+D_real2.item(),
+        }
+
 
     def train(self):
         if self.args.pretrain_embeddings != None:
@@ -451,14 +524,14 @@ class TemplateTrainer():
 
         from datetime import datetime
         cur_time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-        save_path = 'save/tempest_{}-{}'.format(self.args.name, cur_time)
+        save_path = 'save/gan_tempest_{}-{}'.format(self.args.name, cur_time)
         os.makedirs(save_path, exist_ok=True)
         copyfile('module/vmt.py', os.path.join(save_path, 'vmt.py'))
         copyfile('module/vae.py', os.path.join(save_path, 'vae.py'))
         self.save_path = save_path
         with open(os.path.join(save_path, 'params.json'), 'w') as f:
             json.dump(vars(self.args), f)
-        writer = SummaryWriter('logs/tempest_{}-{}'.format(self.args.name, cur_time))
+        writer = SummaryWriter('logs/gan_tempest_{}-{}'.format(self.args.name, cur_time))
 
         i = 0
         self.temp = self.args.kl_weight
@@ -468,7 +541,10 @@ class TemplateTrainer():
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
                 self.model.train()
+
+                dis_losses = self.gan_step(i)
                 total_loss, construct_loss, desc_kl_loss, nll_loss, kl_loss, mf_loss, tmf_loss = self.step(i)
+                
 
                 pbar.update(1)
                 pbar.set_description(
@@ -488,7 +564,12 @@ class TemplateTrainer():
                     }
                     for key, value in loss_val.items():
                         writer.add_scalar('G/'+key, value, i)
+
+                    for key, value in dis_losses.items():
+                        writer.add_scalar(key, value, i)
+
                     writer.add_scalar('temp/gumbel', self.gumbel_temp, i)
+                    writer.add_scalar('temp/temp', self.temperature, i)
 
                 if i % self.args.bleu_iter == 0:
                     self.model.eval()
@@ -499,7 +580,8 @@ class TemplateTrainer():
                     self.model.eval(), self.prod_embeddings.eval(), self.title_rec.eval()
                     self.sample_results(writer, i)
                     self.model.train(), self.prod_embeddings.train(), self.title_rec.train()
-                    self.gumbel_temp = np.maximum(self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i), 0.01)
+                    self.gumbel_temp = np.maximum(self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i), 0.1)
+                    self.temperature = np.maximum(np.exp(-self.args.anneal_rate * i), 0.1)
                     # self.gumbel_temp = np.maximum(self.args.gumbel_max ** (self.gumbel_anneal_rate * i), 0.00005)
 
                 if i % args.check_iter == 0:
@@ -510,11 +592,18 @@ class TemplateTrainer():
                     }, os.path.join(save_path,'checkpoint_{}.pt'.format(i)))
 
                     torch.save({
-                        'gen_opt': self.gen_opt,
+                        'text_opt': self.text_opt,
                         'tmp_opt': self.tmp_opt,
                         'mf_opt': self.rec_opt,
+                        'gen_opt': self.gen_opt,
+                        'dis_opt': self.dis_opt,
                         # 'tmp_adv_opt': self.tmp_adv_opt.state_dict(),
                     }, os.path.join(save_path,'optimizers.pt'))
+
+                    torch.save({
+                        'D': self.discriminator,
+                        # 'tmp_adv_opt': self.tmp_adv_opt.state_dict(),
+                    }, os.path.join(save_path,'discriminator.pt'))
 
 
 if __name__ == "__main__":
@@ -558,9 +647,12 @@ if __name__ == "__main__":
 
     parser.add_argument('--anneal-rate', type=float, default=0.00002)
 
-    parser.add_argument('--gen-lr', type=float, default=0.0005)
+    parser.add_argument('--text-lr', type=float, default=0.001)
     parser.add_argument('--rec-lr', type=float, default=0.001)
-    parser.add_argument('--dis-lr', type=float, default=0.001)
+    parser.add_argument('--trec-lr', type=float, default=0.001)
+    parser.add_argument('--gen-lr', type=float, default=0.0001)
+    parser.add_argument('--dis-lr', type=float, default=0.0005)
+
 
     parser.add_argument('--grad-penalty', type=str2bool, nargs='?',
                         default=False, help='Apply gradient penalty')
@@ -575,7 +667,8 @@ if __name__ == "__main__":
     parser.add_argument('-ckpt','--checkpoint', type=str,
                         default='', help='Update latent assignment every epoch?')
 
-    # parser.add_argument('--dis-weight', type=float, default=0.1)
+    parser.add_argument('--dis-weight', type=float, default=0.1)
+    parser.add_argument('--gen-weight', type=float, default=0.1)
     parser.add_argument('--kl-weight', type=float, default=1.0)
     parser.add_argument('--l2-weight', type=float, default=1e-3)
     # parser.add_argument('--opt-level', type=str, default='O1')
@@ -588,6 +681,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     trainer = TemplateTrainer(args)
+    trainer.gan_step(1)
     # trainer.pretrain(5)
     # trainer.sample_results(None)
     # trainer.step(1)

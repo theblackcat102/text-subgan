@@ -10,8 +10,10 @@ class ResBlock(nn.Module):
         self.res_block = nn.Sequential(
             nn.ReLU(True),
             nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding),
+            nn.BatchNorm1d(channel),
             nn.ReLU(True),
             nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding),
+            nn.BatchNorm1d(channel),
         )
 
     def forward(self, input):

@@ -366,7 +366,6 @@ class TemplateTrainer():
                 max_length=target.shape[1])
 
         self.temp = self.args.kl_weight
-        self.gumbel_temp = np.minimum(self.args.gumbel_max - (self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i)), 0.00005)
 
         nll_loss, kl_loss = self.model.cycle_template(tmp[:, :-1], tmp[:, 1:], temperature=self.gumbel_temp)
         self.tmp_opt.zero_grad()
@@ -504,7 +503,7 @@ class TemplateTrainer():
                     self.model.eval(), self.gate.eval(), self.title_rec.eval()
                     self.sample_results(writer, i)
                     self.model.train(), self.gate.train(), self.title_rec.train()
-                    # self.gumbel_temp = np.maximum(self.args.gumbel_max ** (self.gumbel_anneal_rate * i), 0.00005)
+                    self.gumbel_temp = np.minimum(self.args.gumbel_max - (self.gumbel_temp * np.exp(-self.gumbel_anneal_rate * i)), 0.00005)
 
                 if i % args.check_iter == 0:
                     torch.save({
