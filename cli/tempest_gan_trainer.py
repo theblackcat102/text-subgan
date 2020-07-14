@@ -56,7 +56,7 @@ class TemplateTrainer():
 
         self.discriminator = CNNClassifierModel(vocab_size, 32, args.max_seq_len-1, 1).cuda()
 
-        self.train_iter = data_iter(torch.utils.data.DataLoader(self.train_dataset, num_workers=3,
+        self.train_iter = data_iter(torch.utils.data.DataLoader(self.train_dataset, num_workers=self.args.n_workers,
                         collate_fn=tempest_collate, batch_size=args.batch_size, shuffle=True, 
                         drop_last=True))
         self.prod_embeddings = nn.Embedding(self.prod_size+1, args.user_latent_dim).cuda()
@@ -116,7 +116,7 @@ class TemplateTrainer():
 
         # already mapped to id value
         user2product = self.id_mapping['user2product']
-        eval_dataloader = torch.utils.data.DataLoader(self.valid_dataset, num_workers=8,
+        eval_dataloader = torch.utils.data.DataLoader(self.valid_dataset, num_workers=self.args.n_workers,
                         collate_fn=tempest_collate, batch_size=20, shuffle=False, drop_last=True)
 
         self.prod_embeddings.load_state_dict(checkpoint['prod_embeddings'])
@@ -613,6 +613,8 @@ if __name__ == "__main__":
     # args.dis_embed_dim, args.max_seq_len, args.num_rep
     # args.gen_lr args.gen_adv_lr, args.dis_lr
     parser = argparse.ArgumentParser(description='KKDay users')
+    parser.add_argument('--n-workers', type=int, default=8)
+
     parser.add_argument('--batch-size', type=int, default=16)
     parser.add_argument('--pre-batch-size', type=int, default=48)
     parser.add_argument('--cache-path', type=str, default='dataset')
@@ -681,7 +683,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     trainer = TemplateTrainer(args)
-    trainer.gan_step(1)
+    # trainer.gan_step(1)
     # trainer.pretrain(5)
     # trainer.sample_results(None)
     # trainer.step(1)
