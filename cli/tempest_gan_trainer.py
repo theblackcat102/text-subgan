@@ -278,17 +278,17 @@ class TemplateTrainer():
                     rating = torch.ones(prediction.shape).float().cuda()
                     n_rating = (torch.randn(prediction.shape)*0.01 + torch.zeros(prediction.shape)).float().cuda() 
 
-                    n_prod_embed  = self.prod_embeddings( neg_prods )
-                    neg_prediction = (user_embed*n_prod_embed).sum(1)
+                    # n_prod_embed  = self.prod_embeddings( neg_prods )
+                    # neg_prediction = (user_embed*n_prod_embed).sum(1)
 
-                    mf_loss_ = self.mse_criterion(prediction, rating) + self.mse_criterion(neg_prediction, n_rating)
+                    mf_loss_ = self.mse_criterion(prediction, rating) #+ self.mse_criterion(neg_prediction, n_rating)
                     mf_loss += mf_loss_.item() 
                     mf_cnt += 1
 
-                    prediction = self.title_rec( prods,  target[ non_empty_users.cuda() ])
-                    n_prediction = self.title_rec( neg_prods,  target[ non_empty_users.cuda() ])
+                    # prediction = self.title_rec( prods,  target[ non_empty_users.cuda() ])
+                    # n_prediction = self.title_rec( neg_prods,  target[ non_empty_users.cuda() ])
 
-                    tmf_loss += (self.mse_criterion( prediction, rating ).item() ) + self.mse_criterion(n_prediction, n_rating)
+                    tmf_loss += (self.mse_criterion( prediction, rating ).item() )# + self.mse_criterion(n_prediction, n_rating)
 
 
                 # output_title = torch.argmax(output_logits, dim=-1)
