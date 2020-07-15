@@ -147,6 +147,7 @@ class VMT(nn.Module):
 
         self.content_encoder = VariationalEncoder(self.embedding, desc_latent_dim, enc_hidden_size, 
             num_layers=enc_layers, dropout=dropout, bidirectional=enc_bidirect, cell=nn.LSTM, gpu=gpu)
+        self.content_dropout = nn.Dropout(0.3)
 
         self.attention = LuongAttention(dec_hidden_size, dec_hidden_size)
 
@@ -179,7 +180,7 @@ class VMT(nn.Module):
         if self.gpu:
             device = 'cuda'
         outputs, hidden, mean, std = self.content_encoder(desc,  device=device)
-        return outputs, hidden, mean, std
+        return outputs, self.content_dropout(hidden), mean, std
 
     def encode_tmp(self, template, temperature=1,device='cpu'):
         if self.gpu:

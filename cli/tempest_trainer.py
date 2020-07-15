@@ -192,6 +192,29 @@ class TemplateTrainer():
             writer.add_text("Text", samples, step)
             writer.flush() 
 
+        samples, new_sample = '', ''
+        reversed_tmp = self.tmt_[ list(range(len(tmp_latent)-1, -1, -1)) ]
+        with torch.no_grad():
+            for idx, sent in enumerate(output_title):
+
+                sentence = []
+                for token in reversed_tmp[idx][1:]:
+                    if token.item() == Constants.EOS:
+                        break
+                    sentence.append(  self.valid_dataset.tokenizer.idx2word[token.item()])
+                samples += str(idx) + '. [tmp]: ' +' '.join(sentence) + '\n\n'
+
+                sentence = []
+                for token in sent:
+                    if token.item() == Constants.EOS:
+                        break
+                    sentence.append(  self.valid_dataset.tokenizer.idx2word[token.item()])
+                samples += '       [out]: ' +' '.join(sentence[:30]) + '\n\n'
+
+        if writer != None:
+            writer.add_text("reverse", samples, step)
+            writer.flush()
+
     def calculate_bleu(self, writer, step=0, size=2000, ngram=4, smoothing_function=SmoothingFunction().method3):
         eval_dataloader = torch.utils.data.DataLoader(self.valid_dataset, num_workers=8,
                         collate_fn=tempest_collate, batch_size=20, shuffle=False, drop_last=True)
@@ -588,9 +611,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     trainer = TemplateTrainer(args)
-    # trainer.pretrain(5)
     # trainer.sample_results(None)
-    # trainer.step(1)
+    trainer.step(1)
     # trainer.calculate_bleu(None, size=1000)
     # trainer.test()
     if args.evaluate:

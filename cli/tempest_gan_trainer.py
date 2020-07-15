@@ -590,8 +590,8 @@ class TemplateTrainer():
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
                 self.model.train()
-
-                dis_losses = self.gan_step(i)
+                for _ in range(3):
+                    dis_losses = self.gan_step(i)
                 total_loss, construct_loss, desc_kl_loss, nll_loss, kl_loss, mf_loss, tmf_loss = self.step(i)
                 
 
