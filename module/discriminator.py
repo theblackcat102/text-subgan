@@ -195,7 +195,7 @@ class CNNClassifier(CNNDiscriminator):
 
 
 class CNNClassifierModel(nn.Module):
-    def __init__(self, vocab_size, embedding_dim, max_length, k_label=1):
+    def __init__(self, vocab_size, embedding_dim, max_length, k_label, latent_dim):
         super(CNNClassifierModel, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.block = nn.Sequential(
@@ -225,6 +225,7 @@ class CNNClassifierModel(nn.Module):
         outputs = self.block(inputs)        # (B, H, T)
         outputs = self.maxpool(outputs)     # (B, H, 1)
         outputs = outputs.squeeze(-1)
+        # outputs = torch.cat([outputs, tmp_latent.detach()], dim=-1)
         outputs = self.linear(outputs)      # (B, 1)
         return outputs
 
@@ -247,7 +248,6 @@ class RNNClassifier(nn.Module):
             batch_first=True,
             bidirectional=bidirectional)
         self.linear = nn.Linear(hidden_size * self.num_directions, 1)
-        self.sigmoid = nn.Sigmoid()
 
     def forward(self, inputs, is_discrete=False):
         """
@@ -276,7 +276,7 @@ class RNNClassifier(nn.Module):
         else:
             outputs = hidden[-1, -1, :, :]
         outputs = self.linear(outputs)
-        outputs = self.sigmoid(outputs)
+        # outputs = self.sigmoid(outputs)
         return outputs
 
 

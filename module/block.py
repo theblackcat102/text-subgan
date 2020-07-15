@@ -10,8 +10,8 @@ class Block(nn.Module):
 
         self.net = nn.Sequential(
             nn.Linear(block_dim, block_dim),
-            nn.ReLU(True),
-            nn.BatchNorm1d(block_dim),
+            nn.ReLU(),
+            # nn.BatchNorm1d(block_dim),
             nn.Linear(block_dim, block_dim),
         )
     

@@ -8,11 +8,11 @@ class ResBlock(nn.Module):
         padding = kernel // 2
         self.alpha = alpha
         self.res_block = nn.Sequential(
-            nn.ReLU(True),
-            nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding),
+            nn.ReLU(),
+            nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding, stride=2),
             nn.BatchNorm1d(channel),
-            nn.ReLU(True),
-            nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding),
+            nn.ReLU(),
+            nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding, stride=2),
             nn.BatchNorm1d(channel),
         )
 

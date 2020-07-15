@@ -33,7 +33,7 @@ class GateModule(nn.Module):
         self.gate_bias = torch.nn.init.xavier_uniform_(self.gate_bias)
     
     def forward(self, input1, input2):
-        gate = F.sigmoid(input1.mm(self.gate_matrix1) + input2.mm(self.gate_matrix2) + self.gate_bias)
+        gate = torch.sigmoid(input1.mm(self.gate_matrix1) + input2.mm(self.gate_matrix2) + self.gate_bias)
         gated_embedding = gate * input1 + (1 - gate) * input2
         return gated_embedding
 

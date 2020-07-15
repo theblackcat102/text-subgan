@@ -7,7 +7,7 @@ import os, glob, json
 import config as cfg
 
 from module.vmt import VMT
-from module.discriminator import CNNClassifierModel
+from module.discriminator import CNNClassifierModel, CNNDiscriminator, RNNClassifier
 from module.recommend import SimpleMF
 from module.vae import GaussianKLLoss
 from module.optimizer import AdamW
@@ -19,12 +19,13 @@ from utils import get_fixed_temperature, get_losses
 import sklearn
 import numpy as np
 from tensorboardX import SummaryWriter
-from utils import gradient_penalty, str2bool, chunks
+from utils import gradient_penalty, str2bool, chunks, one_hot
 from nltk.translate.bleu_score import sentence_bleu
 from nltk.translate.bleu_score import SmoothingFunction
 from shutil import copyfile
 import pickle
 from time import time
+
 
 def data_iter(dataloader):
     def function():
@@ -54,17 +55,22 @@ class TemplateTrainer():
             biset=args.biset, user_embedding=True, user_size=user_size,
             max_seq_len=args.max_seq_len-1, gpu=True).cuda()
 
-        self.discriminator = CNNClassifierModel(vocab_size, 32, args.max_seq_len-1, 1).cuda()
-
+        self.discriminator = CNNClassifierModel(vocab_size, 32, args.max_seq_len-1, 1, args.tmp_cat_dim*args.tmp_latent_dim).cuda()
+        # self.discriminator = RNNClassifier( self.model.embedding, 64 ).cuda()
+        # self.discriminator =  CNNDiscriminator(32, vocab_size, [5,4,3], [32, 32, 32], 0, gpu=True).cuda()
         self.train_iter = data_iter(torch.utils.data.DataLoader(self.train_dataset, num_workers=self.args.n_workers,
                         collate_fn=tempest_collate, batch_size=args.batch_size, shuffle=True, 
                         drop_last=True))
         self.prod_embeddings = nn.Embedding(self.prod_size+1, args.user_latent_dim).cuda()
         torch.nn.init.xavier_uniform_(self.prod_embeddings.weight)
 
+        if args.biset:
+            generator_params = list(self.model.title_decoder.parameters()) + list(self.model.biset.parameters())
+        else:
+            generator_params = self.model.title_decoder.parameters() 
 
-        self.gen_opt = optim.Adam(self.model.title_decoder.parameters(), lr=args.gen_lr)
-        self.dis_opt = optim.Adam(self.discriminator.parameters(), lr=args.dis_lr)
+        self.gen_opt = optim.Adam(generator_params, lr=args.gen_lr, betas=(0, 0.9))
+        self.dis_opt = optim.Adam(self.discriminator.parameters(), lr=args.dis_lr, betas=(0, 0.9))
 
         self.text_opt = optim.Adam(self.model.parameters(), lr=args.text_lr)
         self.tmp_opt = optim.Adam(self.model.template_vae.parameters(), lr=args.text_lr)
@@ -207,11 +213,12 @@ class TemplateTrainer():
         # output_title = torch.argmax(output1_logits, dim=-1)
         # output_title2 = torch.argmax(output2_logits, dim=-1)
         samples, new_sample = '', ''
+        reversed_tmp = self.tmt_[ list(range(len(tmp_latent)-1, -1, -1)) ]
         with torch.no_grad():
             for idx, sent in enumerate(output_title):
 
                 sentence = []
-                for token in self.tmt_[idx][1:]:
+                for token in reversed_tmp[idx][1:]:
                     if token.item() == Constants.EOS:
                         break
                     sentence.append(  self.valid_dataset.tokenizer.idx2word[token.item()])
@@ -384,6 +391,7 @@ class TemplateTrainer():
         batch_size = len(empty_users)
         users_filled = users.detach()
         users_filled[empty_users] = torch.randint(0, self.user_size, ( int(empty_users.sum()),  ))
+        users_filled = users_filled.contiguous()
 
         if cfg.CUDA:
             src_inputs = src_inputs.cuda()
@@ -392,34 +400,35 @@ class TemplateTrainer():
             inputs = inputs.cuda()
             users_filled = users_filled.cuda()
 
-        desc_outputs, desc_latent, desc_mean, desc_std = self.model.encode_desc(src_inputs)
-        tmp_outputs, tmp_latent = self.model.encode_tmp(tmp[:, :-1], temperature=self.gumbel_temp)
+        with torch.autograd.set_detect_anomaly(True):
+            desc_outputs, desc_latent, desc_mean, desc_std = self.model.encode_desc(src_inputs)
+            tmp_outputs, tmp_latent = self.model.encode_tmp(tmp[:, :-1], temperature=self.gumbel_temp)
 
-        user_embeddings = self.model.user_embedding( users_filled )
-        output_target, output_logits = self.model.decode(tmp_latent, desc_latent, user_embeddings, 
-                desc_outputs, tmp_outputs,
-                max_length=target.shape[1])
+            user_embeddings = self.model.user_embedding( users_filled )
+            output_target, output_logits = self.model.decode(tmp_latent, desc_latent, user_embeddings, 
+                    desc_outputs, tmp_outputs,
+                    max_length=target.shape[1])
 
-        self.temp = self.args.kl_weight
+            self.temp = self.args.kl_weight
 
-        nll_loss, kl_loss = self.model.cycle_template(tmp[:, :-1], tmp[:, 1:], temperature=self.gumbel_temp)
-        self.tmp_opt.zero_grad()
+            nll_loss, kl_loss = self.model.cycle_template(tmp[:, :-1], tmp[:, 1:], temperature=self.gumbel_temp)
+            self.tmp_opt.zero_grad()
 
-        nll_loss.backward(retain_graph=True)
-        kl_loss.backward(retain_graph=True)
+            nll_loss.backward(retain_graph=True)
+            kl_loss.backward(retain_graph=True)
 
-        self.tmp_opt.step()
+            self.tmp_opt.step()
 
-        self.text_opt.zero_grad()
+            self.text_opt.zero_grad()
 
-        desc_kl_loss = self.KL_loss(desc_mean, desc_std)
-        
-        construct_loss = self.mle_criterion(output_target.view(-1, self.args.vocab_size), target.flatten())
+            desc_kl_loss = self.KL_loss(desc_mean, desc_std)
+            
+            construct_loss = self.mle_criterion(output_target.view(-1, self.args.vocab_size), target.flatten())
 
-        total_loss = construct_loss + desc_kl_loss
+            total_loss = construct_loss + desc_kl_loss
 
-        total_loss.backward()
-        self.text_opt.step()
+            total_loss.backward()
+            self.text_opt.step()
 
         non_empty_users = (batch['users'] != -1) & (batch['prods'] != -1)
         mf_loss = 0
@@ -508,16 +517,20 @@ class TemplateTrainer():
                 desc_outputs2, tmp_outputs1,
                 max_length=target2.shape[1], gumbel=True, temperature=self.temperature)
 
+
         D_fake1 = self.discriminator(fake_target1.detach()).mean()
         D_real1 = self.discriminator(target1, is_discrete=True).mean()
         D_fake2 = self.discriminator(fake_target2.detach()).mean()
         D_real2 = self.discriminator(target2, is_discrete=True).mean()
+        D_adv_loss = self.args.dis_weight * ((D_fake1 - D_real1) + (D_fake2-D_real2)) / 2
 
-        D_loss = self.args.dis_weight * ((D_fake1 - D_real1) + (D_fake2-D_real2)) / 2
-
+        D_loss = D_adv_loss
         self.dis_opt.zero_grad()
         D_loss.backward()
         self.dis_opt.step()
+
+        for p in self.discriminator.parameters():
+            p.data.clamp_(-0.1, 0.1)
 
         if i % 5 == 0:
             G_wgan1 = -self.discriminator(fake_target1).mean()
@@ -685,11 +698,11 @@ if __name__ == "__main__":
 
     parser.add_argument('--anneal-rate', type=float, default=0.00002)
 
-    parser.add_argument('--text-lr', type=float, default=0.001)
+    parser.add_argument('--text-lr', type=float, default=0.0005)
     parser.add_argument('--rec-lr', type=float, default=0.001)
     parser.add_argument('--trec-lr', type=float, default=0.001)
-    parser.add_argument('--gen-lr', type=float, default=0.00001)
-    parser.add_argument('--dis-lr', type=float, default=0.00001)
+    parser.add_argument('--gen-lr', type=float, default=0.0001)
+    parser.add_argument('--dis-lr', type=float, default=0.0001)
 
 
     parser.add_argument('--grad-penalty', type=str2bool, nargs='?',
@@ -719,10 +732,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     trainer = TemplateTrainer(args)
-    # trainer.gan_step(1)
-    # trainer.pretrain(5)
-    # trainer.sample_results(None)
-    # trainer.step(1)
+    print(trainer.discriminator)
+    trainer.gan_step(0)
+    trainer.sample_results(None)
+    trainer.step(1)
     # trainer.calculate_bleu(None, size=1000)
     # trainer.test()
     if args.evaluate:

@@ -16,7 +16,7 @@ def sample_gumbel(shape, eps=1e-20, device='cuda'):
 
 def gumbel_softmax_sample(logits, temperature, device='cuda'):
     y = logits + sample_gumbel(logits.size(), device=device)
-    return F.softmax(y / temperature, dim=-1)
+    return torch.softmax(y / temperature, dim=-1)
 
 
 def gumbel_softmax(logits, temperature, hard=False, device='cuda'):
@@ -60,14 +60,13 @@ class VAE_Gumbel(nn.Module):
             nn.BatchNorm1d(enc_hidden),
             nn.ReLU(inplace=True),
             nn.Linear(enc_hidden, latent_dim*categorical_dim),
-            nn.BatchNorm1d(latent_dim*categorical_dim),
-            nn.ReLU(inplace=True),
         )
 
         self.cell = nn.LSTM
 
         self.latent2hidden = nn.Sequential(
             nn.BatchNorm1d(latent_dim*categorical_dim),
+            nn.ReLU(inplace=True),
             nn.Linear(latent_dim*categorical_dim,  dec_hidden),
         )
         self.log_softmax = nn.LogSoftmax(dim=-1)
@@ -117,7 +116,7 @@ class VAE_Gumbel(nn.Module):
             st_mode=st_mode, temperature=temperature)
         decoder_output, inp = self.decode(z, max_length, device=device)
         latent_y = latent.view(latent.size(0), self.latent_dim, self.categorical_dim)
-        return decoder_output, F.softmax(latent_y, dim=-1).reshape(*latent.size()), inp
+        return decoder_output, torch.softmax(latent_y, dim=-1).reshape(*latent.size()), inp
 
 
 

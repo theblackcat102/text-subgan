@@ -20,7 +20,7 @@ class T2A(nn.Module):
         seq_len = template_hidden.shape[0]
         article_hidden = article_hidden[-1,:,:].repeat(seq_len,1,1)
         s = self.W(article_hidden)+self.U(template_hidden)+self.b
-        s = template_hidden*F.sigmoid(s)
+        s = template_hidden*torch.sigmoid(s)
         return s
 
 class A2T(nn.Module):
