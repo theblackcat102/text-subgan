@@ -141,7 +141,7 @@ class TemplateTrainer():
                         predicted.append(rank.cpu().numpy())
 
         if len(predicted) > 10:
-            print(actual[0], actual[1])
+            # print(actual[0], actual[1])
             with open('results.txt', 'a') as f:
                 f.write('Recommendation Performance: \n')
                 f.write('Recall@5 {:>10.3f}\n'.format(recall_at_k(actual, predicted, 5)))
@@ -732,10 +732,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     trainer = TemplateTrainer(args)
-    print(trainer.discriminator)
-    trainer.gan_step(0)
-    trainer.sample_results(None)
-    trainer.step(1)
+    # trainer.gan_step(0)
+    # trainer.sample_results(None)
+    # trainer.step(1)
     # trainer.calculate_bleu(None, size=1000)
     # trainer.test()
     if args.evaluate:

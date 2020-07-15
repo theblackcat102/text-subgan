@@ -9,10 +9,10 @@ class ResBlock(nn.Module):
         self.alpha = alpha
         self.res_block = nn.Sequential(
             nn.ReLU(),
-            nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding, stride=2),
+            nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding),
             nn.BatchNorm1d(channel),
             nn.ReLU(),
-            nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding, stride=2),
+            nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding),
             nn.BatchNorm1d(channel),
         )
 

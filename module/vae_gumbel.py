@@ -115,8 +115,8 @@ class VAE_Gumbel(nn.Module):
         encoder_output, z, latent = self.encode(inputs, device=device, 
             st_mode=st_mode, temperature=temperature)
         decoder_output, inp = self.decode(z, max_length, device=device)
-        latent_y = latent.view(latent.size(0), self.latent_dim, self.categorical_dim)
-        return decoder_output, torch.softmax(latent_y, dim=-1).reshape(*latent.size()), inp
+        # latent_y = latent.view(latent.size(0), self.latent_dim, self.categorical_dim)
+        return decoder_output, z, inp
 
 
 
