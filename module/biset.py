@@ -66,9 +66,8 @@ class BiSET(nn.Module):
         if article_hidden_size != template_hidden_size:
             self.t_proj = nn.Linear(template_hidden_size, article_hidden_size)
 
-        self.T2A=T2A(article_hidden_size)
-
-        self.A2T=A2T(article_hidden_size, att_type=att_type)
+        self.T2A = T2A(article_hidden_size)
+        self.A2T = A2T(article_hidden_size, att_type=att_type)
 
     def forward(self, article_hidden, template_hidden):
         # torch.Size([18, 32, 64]) torch.Size([18, 32, 64])
@@ -94,11 +93,32 @@ class BiSET(nn.Module):
         memory_bank = memory_bank.transpose(0, 1)
         return memory_bank
 
+class MultiBiSET(nn.Module):
+    def __init__(self, article_hidden_size, template_hidden_size, num_heads=2 ,att_type='general'):
+        '''
+            hidden_size must be same as input hidden size
+        '''
+        super().__init__()
+        self.bisets = nn.ModuleList([ BiSET(article_hidden_size, template_hidden_size, att_type=att_type)   for _ in range(num_heads) ])
+        self.mlp = nn.Sequential(
+            nn.Linear(article_hidden_size*num_heads, article_hidden_size),
+            nn.LayerNorm(article_hidden_size),
+        )
+
+    def forward(self, article_hidden, template_hidden):
+        # torch.Size([18, 32, 64]) torch.Size([18, 32, 64])
+        # T x B x hidden dim
+        memory_banks = []
+        for i, biset in enumerate(self.bisets):
+            memory_banks.append(biset( article_hidden, template_hidden ))
+        memory_bank = self.mlp(torch.cat(memory_banks, dim=-1))
+
+        return memory_bank
+
 
 if __name__ == "__main__":
     a_hidden = torch.randn(32, 10, 32)
     t_hidden = torch.randn(32, 10, 64)
-    biset = BiSET(32, 64, att_type='dot')
+    biset = MultiBiSET(32, 64, att_type='dot')
     memory = biset(a_hidden, t_hidden)
-
     print(memory.shape)

@@ -6,7 +6,7 @@ from module.seq2seq import LuongAttention
 from constant import Constants
 import torch.nn.functional as F
 from module.discriminator import CNNDiscriminator
-from module.biset import BiSET
+from module.biset import BiSET, MultiBiSET
 
 dis_filter_sizes = [2, 3, 4, 5]
 dis_num_filters = [64, 64, 64, 32]
@@ -148,8 +148,9 @@ class VMT(nn.Module):
         self.content_encoder = VariationalEncoder(self.embedding, desc_latent_dim, enc_hidden_size, 
             num_layers=enc_layers, dropout=dropout, bidirectional=enc_bidirect, cell=nn.LSTM, gpu=gpu)
         self.content_dropout = nn.Dropout(0.3)
-
-        self.attention = LuongAttention(dec_hidden_size, dec_hidden_size)
+        self.attention = None
+        if attention:
+            self.attention = LuongAttention(dec_hidden_size, dec_hidden_size)
 
         self.title_decoder = VariationalDecoder(self.embedding, dec_hidden_size,
             num_layers=dec_layers, dropout=dropout, st_mode=False, cell=nn.LSTM, attention=self.attention)
@@ -158,7 +159,7 @@ class VMT(nn.Module):
 
         self.biset = None
         if biset:
-            self.biset = BiSET(article_hidden_size=enc_hidden_size, template_hidden_size= tmp_hidden_size, att_type='general')
+            self.biset = MultiBiSET(article_hidden_size=enc_hidden_size, template_hidden_size= tmp_hidden_size, num_heads=3, att_type='general')
 
         self.max_seq_len = max_seq_len
         self.user_latent_dim = user_latent_dim
@@ -169,11 +170,11 @@ class VMT(nn.Module):
         self.gpu = gpu
 
     def cycle_template(self, src, output, temperature=1):
-        decoder_output, latent, inp = self.template_vae(src, max_length=output.shape[1], temperature=temperature)
+        decoder_output, latent, latent_y = self.template_vae(src, max_length=output.shape[1], temperature=temperature)
         nll_loss = self.mle_criterion(decoder_output.view(-1, self.vocab_size),
                 output.flatten())
-        log_ratio = torch.log(latent * self.template_vae.categorical_dim + 1e-20)
-        kl_loss = torch.sum(latent * log_ratio, dim=-1).mean()
+        log_ratio = torch.log(latent_y * self.template_vae.categorical_dim + 1e-20)
+        kl_loss = torch.sum(latent_y * log_ratio, dim=-1).mean()
         return nll_loss, kl_loss
 
     def encode_desc(self, desc, device='cpu'):

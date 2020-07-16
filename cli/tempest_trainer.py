@@ -612,7 +612,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     trainer = TemplateTrainer(args)
     # trainer.sample_results(None)
-    trainer.step(1)
+    # trainer.step(1)
     # trainer.calculate_bleu(None, size=1000)
     # trainer.test()
     if args.evaluate:

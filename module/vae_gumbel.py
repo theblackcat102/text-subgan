@@ -112,11 +112,13 @@ class VAE_Gumbel(nn.Module):
     
 
     def forward(self, inputs, max_length, temperature=1, st_mode=False, device='cuda'):
-        encoder_output, z, latent = self.encode(inputs, device=device, 
+        encoder_output, z, latent_z = self.encode(inputs, device=device, 
             st_mode=st_mode, temperature=temperature)
         decoder_output, inp = self.decode(z, max_length, device=device)
-        # latent_y = latent.view(latent.size(0), self.latent_dim, self.categorical_dim)
-        return decoder_output, z, inp
+
+        latent_z = latent_z.view(latent_z.size(0), self.latent_dim, self.categorical_dim)
+        latent_z =  F.softmax(latent_z, dim=-1)
+        return decoder_output, z, latent_z.view(latent_z.size(0), -1)
 
 
 
