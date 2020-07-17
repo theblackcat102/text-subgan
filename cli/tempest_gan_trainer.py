@@ -609,12 +609,11 @@ class TemplateTrainer():
                         'mf': prev_mf_loss,
                         'prod_title_align': tmf_loss,
                     }
+                    for key, value in loss_val.items():
+                        writer.add_scalar('G/'+key, value, i)
                     if i > self.start_gan:
-                        for key, value in loss_val.items():
-                            writer.add_scalar('G/'+key, value, i)
-
-                    for key, value in dis_losses.items():
-                        writer.add_scalar(key, value, i)
+                        for key, value in dis_losses.items():
+                            writer.add_scalar(key, value, i)
 
                     writer.add_scalar('temp/gumbel', self.gumbel_temp, i)
                     writer.add_scalar('temp/temp', self.temperature, i)
