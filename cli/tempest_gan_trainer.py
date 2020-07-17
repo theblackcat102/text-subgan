@@ -55,7 +55,7 @@ class TemplateTrainer():
             biset=args.biset, user_embedding=True, user_size=user_size,
             max_seq_len=args.max_seq_len-1, gpu=True).cuda()
 
-        self.discriminator = CNNClassifierModel(vocab_size, 32, args.max_seq_len-1, 1, args.tmp_cat_dim*args.tmp_latent_dim).cuda()
+        self.discriminator = CNNClassifierModel(vocab_size, 64, args.max_seq_len-1, 1, args.tmp_cat_dim*args.tmp_latent_dim).cuda()
         # self.discriminator = RNNClassifier( self.model.embedding, 64 ).cuda()
         # self.discriminator =  CNNDiscriminator(32, vocab_size, [5,4,3], [32, 32, 32], 0, gpu=True).cuda()
         self.train_iter = data_iter(torch.utils.data.DataLoader(self.train_dataset, num_workers=self.args.n_workers,
@@ -69,8 +69,8 @@ class TemplateTrainer():
         else:
             generator_params = self.model.title_decoder.parameters() 
 
-        self.gen_opt = optim.Adam(generator_params, lr=args.gen_lr, betas=(0, 0.9))
-        self.dis_opt = optim.Adam(self.discriminator.parameters(), lr=args.dis_lr, betas=(0, 0.9))
+        self.gen_opt = optim.Adam(generator_params, lr=args.gen_lr, betas=(0.5, 0.9))
+        self.dis_opt = optim.Adam(self.discriminator.parameters(), lr=args.dis_lr, betas=(0.5, 0.9))
 
         self.text_opt = optim.Adam(self.model.parameters(), lr=args.text_lr)
         self.tmp_opt = optim.Adam(self.model.template_vae.parameters(), lr=args.text_lr)
@@ -79,7 +79,7 @@ class TemplateTrainer():
 
         self.title_rec = SimpleMF( self.prod_size+1, vocab_size, user_embedding=self.prod_embeddings, n_factors=args.user_latent_dim).cuda()
         self.trec_opt = AdamW(self.title_rec.parameters(), lr=args.dis_lr, weight_decay=1e-5)
-
+        self.bce_loss = nn.BCEWithLogitsLoss()
         self.mle_criterion = nn.NLLLoss(ignore_index=Constants.PAD)
         self.KL_loss = GaussianKLLoss()
         self.mse_criterion = nn.MSELoss()
@@ -91,6 +91,8 @@ class TemplateTrainer():
         N = args.iterations
         self.gumbel_anneal_rate = 1 / N
         self.temp_anneal = 1.0 / N
+        self.start_gan = args.start_gan
+        self.clip_weight = args.clip_weight
         self.temp = args.temperature_min 
         self.init_sample_inputs()
 
@@ -518,44 +520,41 @@ class TemplateTrainer():
                 max_length=target2.shape[1], gumbel=True, temperature=self.temperature)
 
 
-        D_fake1 = self.discriminator(fake_target1.detach()).mean()
-        D_real1 = self.discriminator(target1, is_discrete=True).mean()
-        D_fake2 = self.discriminator(fake_target2.detach()).mean()
-        D_real2 = self.discriminator(target2, is_discrete=True).mean()
-        D_adv_loss = self.args.dis_weight * ((D_fake1 - D_real1) + (D_fake2-D_real2)) / 2
+        D_fake1 = self.discriminator(fake_target1.detach(), tmp_latent2)
+        D_real1 = self.discriminator(target1, tmp_latent1, is_discrete=True)
+        D_fake2 = self.discriminator(fake_target2.detach(), tmp_latent1)
+        D_real2 = self.discriminator(target2, tmp_latent2, is_discrete=True)
+        # D_adv_loss = self.args.dis_weight * ((D_fake1 - D_real1) + (D_fake2-D_real2)) / 2
+        d_loss_real =  (torch.nn.ReLU()(1.0 - D_real1).mean() + \
+                torch.nn.ReLU()(1.0 - D_real2).mean())/2
 
-        D_loss = D_adv_loss
+        d_loss_fake = (torch.nn.ReLU()(1.0 + D_fake1).mean() + \
+                torch.nn.ReLU()(1.0 + D_fake2).mean()) / 2
+
+        D_loss = d_loss_real + d_loss_fake
         self.dis_opt.zero_grad()
         D_loss.backward()
         self.dis_opt.step()
 
-        for p in self.discriminator.parameters():
-            p.data.clamp_(-0.1, 0.1)
+        D_fake1 = self.discriminator(fake_target1, tmp_latent2)
+        D_fake2 = self.discriminator(fake_target2, tmp_latent1)
+        G_wgan1 = -D_fake1.mean()
+        G_wgan2 = -D_fake2.mean()
+        G_wgan = self.args.gen_weight * (G_wgan1 + G_wgan2 ) / 2
+        # G_wgan = self.bce_loss(D_fake1, torch.ones_like(D_fake1)) + \
+        #         self.bce_loss(D_fake2, torch.ones_like(D_fake2))
 
-        if i % 5 == 0:
-            G_wgan1 = -self.discriminator(fake_target1).mean()
-            G_wgan2 = -self.discriminator(fake_target2).mean()
-            G_wgan = self.args.gen_weight * (G_wgan1 + G_wgan2) / 2
-
-            self.gen_opt.zero_grad()
-            G_wgan.backward()
-            self.gen_opt.step()
-
-            return {
-                'GAN/g_loss': G_wgan.item(),
-                'GAN/g_wgan1': G_wgan1.item(),
-                'GAN/g_wgan2': G_wgan2.item(),
-                'GAN/d_loss': D_loss.item(),
-                'GAN/d_fake': D_fake1.item()+D_fake2.item(),
-                'GAN/d_real': D_real1.item()+D_real2.item(),
-            }
-
+        self.gen_opt.zero_grad()
+        G_wgan.backward()
+        self.gen_opt.step()
         return {
+            'GAN/g_loss': G_wgan.item(),
+            'GAN/g_wgan1': G_wgan1.item(),
+            'GAN/g_wgan2': G_wgan2.item(),
             'GAN/d_loss': D_loss.item(),
-            'GAN/d_fake': D_fake1.item()+D_fake2.item(),
-            'GAN/d_real': D_real1.item()+D_real2.item(),
+            'GAN/d_fake': d_loss_fake.item(),
+            'GAN/d_real': d_loss_real.item(),
         }
-        
 
 
     def train(self):
@@ -590,10 +589,9 @@ class TemplateTrainer():
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
                 self.model.train()
-                for _ in range(3):
+                if i > self.start_gan:
                     dis_losses = self.gan_step(i)
                 total_loss, construct_loss, desc_kl_loss, nll_loss, kl_loss, mf_loss, tmf_loss = self.step(i)
-                
 
                 pbar.update(1)
                 pbar.set_description(
@@ -696,17 +694,17 @@ if __name__ == "__main__":
     parser.add_argument('--temperature', type=float, default=1)
     parser.add_argument('--gumbel-max', type=float, default=5)
 
-    parser.add_argument('--anneal-rate', type=float, default=0.00002)
+    parser.add_argument('--anneal-rate', type=float, default=0.00002, help='template gumbel softmax annealing')
 
-    parser.add_argument('--text-lr', type=float, default=0.0005)
-    parser.add_argument('--rec-lr', type=float, default=0.001)
-    parser.add_argument('--trec-lr', type=float, default=0.001)
-    parser.add_argument('--gen-lr', type=float, default=0.0001)
-    parser.add_argument('--dis-lr', type=float, default=0.0001)
+    parser.add_argument('--text-lr', type=float, default=0.0005, help='seq2seq model learning rate')
+    parser.add_argument('--rec-lr', type=float, default=0.001, help='recommender learning rate')
+    parser.add_argument('--trec-lr', type=float, default=0.001, help='text to item rating alignment learning rate')
+    parser.add_argument('--gen-lr', type=float, default=0.0001, help='text generator learning')
+    parser.add_argument('--dis-lr', type=float, default=0.0001, help='text discriminator learning rate')
 
-
+    parser.add_argument('--start-gan', type=float, default=5000, help='when to start gan loss')
     parser.add_argument('--grad-penalty', type=str2bool, nargs='?',
-                        default=False, help='Apply gradient penalty')
+                        default=False, help='Apply gradient penalty not used')
     parser.add_argument('--full-text', type=str2bool, nargs='?',
                         default=False, help='Dataset return full max length')
     parser.add_argument('--update-latent', type=str2bool, nargs='?',
@@ -717,10 +715,10 @@ if __name__ == "__main__":
                         default=False, help='Update latent assignment every epoch?')
     parser.add_argument('-ckpt','--checkpoint', type=str,
                         default='', help='Update latent assignment every epoch?')
-
+    parser.add_argument('--clip-weight', type=float, default=0.1, help='not used')
     parser.add_argument('--dis-weight', type=float, default=1)
     parser.add_argument('--gen-weight', type=float, default=1)
-    parser.add_argument('--kl-weight', type=float, default=1.0)
+    parser.add_argument('--kl-weight', type=float, default=10.0)
     parser.add_argument('--l2-weight', type=float, default=1e-3)
     # parser.add_argument('--opt-level', type=str, default='O1')
     # parser.add_argument('--cycle-weight', type=float, default=0.2)

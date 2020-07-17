@@ -159,7 +159,7 @@ class VMT(nn.Module):
 
         self.biset = None
         if biset:
-            self.biset = MultiBiSET(article_hidden_size=enc_hidden_size, template_hidden_size= tmp_hidden_size, num_heads=3, att_type='general')
+            self.biset = BiSET(article_hidden_size=enc_hidden_size, template_hidden_size= tmp_hidden_size, num_heads=3, att_type='general')
 
         self.max_seq_len = max_seq_len
         self.user_latent_dim = user_latent_dim

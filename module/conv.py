@@ -1,5 +1,5 @@
 import torch.nn as nn
-
+from torch.nn.utils import spectral_norm
 
 class ResBlock(nn.Module):
     def __init__(self, channel, kernel=5, alpha=0.3):
@@ -8,11 +8,13 @@ class ResBlock(nn.Module):
         padding = kernel // 2
         self.alpha = alpha
         self.res_block = nn.Sequential(
-            nn.ReLU(),
+            nn.LeakyReLU(0.1),
             nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding),
+            nn.Dropout(0.3),
             nn.BatchNorm1d(channel),
-            nn.ReLU(),
+            nn.LeakyReLU(0.1),
             nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding),
+            nn.Dropout(0.3),
             nn.BatchNorm1d(channel),
         )
 
