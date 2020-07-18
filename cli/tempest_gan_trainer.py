@@ -554,7 +554,7 @@ class TemplateTrainer():
         G_loss.backward()
         self.gen_opt.step()
         return {
-            'GAN/g_loss': G_wgan.item(),
+            'GAN/g_loss': G_loss.item(),
             # 'GAN/g_wgan1': G_wgan1.item(),
             # 'GAN/g_wgan2': G_wgan2.item(),
             'GAN/d_loss': D_loss.item(),
