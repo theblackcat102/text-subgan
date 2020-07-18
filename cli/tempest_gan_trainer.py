@@ -65,9 +65,10 @@ class TemplateTrainer():
         torch.nn.init.xavier_uniform_(self.prod_embeddings.weight)
 
         if args.biset:
-            generator_params = list(self.model.title_decoder.parameters()) + list(self.model.biset.parameters())
+            generator_params = list(self.model.title_decoder.parameters()) + list(self.model.biset.parameters()) + list(self.template_vae.parameters())
         else:
-            generator_params = self.model.title_decoder.parameters() 
+            print('full generator')
+            generator_params = self.model.parameters()
 
         self.gen_opt = optim.Adam(generator_params, lr=args.gen_lr, betas=(0.5, 0.9))
         self.dis_opt = optim.Adam(self.discriminator.parameters(), lr=args.dis_lr, betas=(0.5, 0.9))
@@ -520,40 +521,43 @@ class TemplateTrainer():
                 max_length=target2.shape[1], gumbel=True, temperature=self.temperature)
 
 
-        D_fake1 = self.discriminator(fake_target1.detach(), tmp_latent2)
-        D_real1 = self.discriminator(target1, tmp_latent1, is_discrete=True)
-        D_fake2 = self.discriminator(fake_target2.detach(), tmp_latent1)
-        D_real2 = self.discriminator(target2, tmp_latent2, is_discrete=True)
+        D_fake1 = self.discriminator(fake_target1.detach())
+        D_real1 = self.discriminator(target1, is_discrete=True)
+        D_fake2 = self.discriminator(fake_target2.detach())
+        D_real2 = self.discriminator(target2, is_discrete=True)
         # D_adv_loss = self.args.dis_weight * ((D_fake1 - D_real1) + (D_fake2-D_real2)) / 2
-        d_loss_real =  (torch.nn.ReLU()(1.0 - D_real1).mean() + \
-                torch.nn.ReLU()(1.0 - D_real2).mean())/2
+        # d_loss_real =  (torch.nn.ReLU()(1.0 - D_real1).mean() + \
+        #         torch.nn.ReLU()(1.0 - D_real2).mean())/2
 
-        d_loss_fake = (torch.nn.ReLU()(1.0 + D_fake1).mean() + \
-                torch.nn.ReLU()(1.0 + D_fake2).mean()) / 2
-
-        D_loss = d_loss_real + d_loss_fake
+        # d_loss_fake = (torch.nn.ReLU()(1.0 + D_fake1).mean() + \
+        #         torch.nn.ReLU()(1.0 + D_fake2).mean()) / 2
+        D_loss = self.bce_loss(D_real1 - D_fake1, torch.ones_like(D_real1)) + \
+            self.bce_loss(D_real2 - D_fake2, torch.ones_like(D_real2))
+        # D_loss = d_loss_real + d_loss_fake
         self.dis_opt.zero_grad()
         D_loss.backward()
         self.dis_opt.step()
 
-        D_fake1 = self.discriminator(fake_target1, tmp_latent2)
-        D_fake2 = self.discriminator(fake_target2, tmp_latent1)
-        G_wgan1 = -D_fake1.mean()
-        G_wgan2 = -D_fake2.mean()
-        G_wgan = self.args.gen_weight * (G_wgan1 + G_wgan2 ) / 2
+        D_fake1 = self.discriminator(fake_target1)
+        D_fake2 = self.discriminator(fake_target2)
+        # G_wgan1 = -D_fake1.mean()
+        # G_wgan2 = -D_fake2.mean()
+        # G_wgan = self.args.gen_weight * (G_wgan1 + G_wgan2 ) / 2
+        G_loss = self.bce_loss(D_fake1 - D_real1, torch.ones_like(D_fake1)) + \
+            self.bce_loss(D_fake2 - D_real2, torch.ones_like(D_fake2))
         # G_wgan = self.bce_loss(D_fake1, torch.ones_like(D_fake1)) + \
         #         self.bce_loss(D_fake2, torch.ones_like(D_fake2))
 
         self.gen_opt.zero_grad()
-        G_wgan.backward()
+        G_loss.backward()
         self.gen_opt.step()
         return {
             'GAN/g_loss': G_wgan.item(),
-            'GAN/g_wgan1': G_wgan1.item(),
-            'GAN/g_wgan2': G_wgan2.item(),
+            # 'GAN/g_wgan1': G_wgan1.item(),
+            # 'GAN/g_wgan2': G_wgan2.item(),
             'GAN/d_loss': D_loss.item(),
-            'GAN/d_fake': d_loss_fake.item(),
-            'GAN/d_real': d_loss_real.item(),
+            # 'GAN/d_fake': d_loss_fake.item(),
+            # 'GAN/d_real': d_loss_real.item(),
         }
 
 
@@ -730,7 +734,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     trainer = TemplateTrainer(args)
-    # trainer.gan_step(0)
+    trainer.gan_step(0)
     # trainer.sample_results(None)
     # trainer.step(1)
     # trainer.calculate_bleu(None, size=1000)

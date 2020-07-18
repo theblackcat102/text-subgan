@@ -200,17 +200,19 @@ class CNNClassifierModel(nn.Module):
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.block = nn.Sequential(
             ResBlock(embedding_dim),
+            nn.Dropout(0.1),
             ResBlock(embedding_dim),
+            nn.Dropout(0.1),
             ResBlock(embedding_dim),
         )
         self.maxpool = nn.AdaptiveMaxPool1d(1)
         self.linear = nn.Sequential(
-            nn.LayerNorm(embedding_dim+latent_dim),
+            nn.LayerNorm(embedding_dim),
             nn.LeakyReLU(0.1),
-            nn.Linear(embedding_dim+latent_dim, k_label)
+            nn.Linear(embedding_dim, k_label)
         )
 
-    def forward(self, inputs, tmp_latent, is_discrete=False):
+    def forward(self, inputs, is_discrete=False):
         """
             inputs: float tensor, shape = [B, T, vocab_size]
         """
@@ -225,7 +227,7 @@ class CNNClassifierModel(nn.Module):
         outputs = self.block(inputs)        # (B, H, T)
         outputs = self.maxpool(outputs)     # (B, H, 1)
         outputs = outputs.squeeze(-1)
-        outputs = torch.cat([outputs, tmp_latent.detach()], dim=-1)
+        # outputs = torch.cat([outputs, tmp_latent.detach()], dim=-1)
         outputs = self.linear(outputs)      # (B, 1)
         return outputs
 
