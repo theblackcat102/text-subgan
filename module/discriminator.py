@@ -200,8 +200,11 @@ class CNNClassifierModel(nn.Module):
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.block = nn.Sequential(
             ResBlock(embedding_dim),
+            nn.Dropout(0.3),
             ResBlock(embedding_dim),
+            nn.Dropout(0.3),
             ResBlock(embedding_dim),
+            nn.Dropout(0.3),
             ResBlock(embedding_dim),
         )
         self.maxpool = nn.AdaptiveMaxPool1d(1)

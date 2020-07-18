@@ -2,16 +2,16 @@ import torch.nn as nn
 
 
 class ResBlock(nn.Module):
-    def __init__(self, channel, kernel=5, alpha=0.3):
+    def __init__(self, channel, kernel=5, alpha=0.5):
         super(ResBlock, self).__init__()
         assert(kernel % 2 == 1)
         padding = kernel // 2
         self.alpha = alpha
         self.res_block = nn.Sequential(
-            nn.ReLU(),
+            nn.LeakyReLU(0.1),
             nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding),
             nn.BatchNorm1d(channel),
-            nn.ReLU(),
+            nn.LeakyReLU(0.1),
             nn.Conv1d(channel, channel, kernel_size=kernel, padding=padding),
             nn.BatchNorm1d(channel),
         )

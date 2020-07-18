@@ -64,13 +64,9 @@ class TemplateTrainer():
         self.prod_embeddings = nn.Embedding(self.prod_size+1, args.user_latent_dim).cuda()
         torch.nn.init.xavier_uniform_(self.prod_embeddings.weight)
 
-        if args.biset:
-            generator_params = list(self.model.title_decoder.parameters()) + list(self.model.biset.parameters())
-        else:
-            generator_params = self.model.title_decoder.parameters() 
-
-        self.gen_opt = optim.Adam(generator_params, lr=args.gen_lr, betas=(0, 0.9))
-        self.dis_opt = optim.Adam(self.discriminator.parameters(), lr=args.dis_lr, betas=(0, 0.9))
+        generator_params = self.model.parameters()
+        self.gen_opt = optim.Adam(generator_params, lr=args.gen_lr, betas=(0.5, 0.99))
+        self.dis_opt = optim.Adam(self.discriminator.parameters(), lr=args.dis_lr, betas=(0.5, 0.99))
 
         self.text_opt = optim.Adam(self.model.parameters(), lr=args.text_lr)
         self.tmp_opt = optim.Adam(self.model.template_vae.parameters(), lr=args.text_lr)
@@ -82,6 +78,7 @@ class TemplateTrainer():
 
         self.mle_criterion = nn.NLLLoss(ignore_index=Constants.PAD)
         self.KL_loss = GaussianKLLoss()
+        self.bce_loss = nn.BCEWithLogitsLoss()
         self.mse_criterion = nn.MSELoss()
         self.xent_criterion = nn.CrossEntropyLoss()
 
@@ -518,42 +515,41 @@ class TemplateTrainer():
                 max_length=target2.shape[1], gumbel=True, temperature=self.temperature)
 
 
-        D_fake1 = self.discriminator(fake_target1.detach()).mean()
-        D_real1 = self.discriminator(target1, is_discrete=True).mean()
-        D_fake2 = self.discriminator(fake_target2.detach()).mean()
-        D_real2 = self.discriminator(target2, is_discrete=True).mean()
-        D_adv_loss = self.args.dis_weight * ((D_fake1 - D_real1) + (D_fake2-D_real2)) / 2
+        D_fake1 = self.discriminator(fake_target1.detach())
+        D_real1 = self.discriminator(target1, is_discrete=True)
+        D_fake2 = self.discriminator(fake_target2.detach())
+        D_real2 = self.discriminator(target2, is_discrete=True)
+        # D_adv_loss = self.args.dis_weight * ((D_fake1 - D_real1) + (D_fake2-D_real2)) / 2
+        # d_loss_real =  (torch.nn.ReLU()(1.0 - D_real1).mean() + \
+        #         torch.nn.ReLU()(1.0 - D_real2).mean())/2
 
-        D_loss = D_adv_loss
+        # d_loss_fake = (torch.nn.ReLU()(1.0 + D_fake1).mean() + \
+        #         torch.nn.ReLU()(1.0 + D_fake2).mean()) / 2
+        D_loss = ( self.bce_loss(D_real1 - D_fake1, torch.ones_like(D_real1)) + \
+            self.bce_loss(D_real2 - D_fake2, torch.ones_like(D_real2)) ) / 2
+        # D_loss = d_loss_real + d_loss_fake
         self.dis_opt.zero_grad()
         D_loss.backward()
         self.dis_opt.step()
 
-        for p in self.discriminator.parameters():
-            p.data.clamp_(-0.1, 0.1)
 
         if i % 5 == 0:
-            G_wgan1 = -self.discriminator(fake_target1).mean()
-            G_wgan2 = -self.discriminator(fake_target2).mean()
-            G_wgan = self.args.gen_weight * (G_wgan1 + G_wgan2) / 2
-
-            self.gen_opt.zero_grad()
-            G_wgan.backward()
-            self.gen_opt.step()
-
+            D_fake1 = self.discriminator(fake_target1)
+            D_fake2 = self.discriminator(fake_target2)
+            D_real1 = self.discriminator(target1, is_discrete=True)
+            D_real2 = self.discriminator(target2, is_discrete=True)
+            # G_wgan1 = -D_fake1.mean()
+            # G_wgan2 = -D_fake2.mean()
+            # G_wgan = self.args.gen_weight * (G_wgan1 + G_wgan2 ) / 2
+            G_loss = (self.bce_loss(D_fake1 - D_real1, torch.ones_like(D_fake1)) + \
+                self.bce_loss(D_fake2 - D_real2, torch.ones_like(D_fake2))) / 2
             return {
-                'GAN/g_loss': G_wgan.item(),
-                'GAN/g_wgan1': G_wgan1.item(),
-                'GAN/g_wgan2': G_wgan2.item(),
+                'GAN/g_loss': G_loss.item(),
                 'GAN/d_loss': D_loss.item(),
-                'GAN/d_fake': D_fake1.item()+D_fake2.item(),
-                'GAN/d_real': D_real1.item()+D_real2.item(),
             }
 
         return {
             'GAN/d_loss': D_loss.item(),
-            'GAN/d_fake': D_fake1.item()+D_fake2.item(),
-            'GAN/d_real': D_real1.item()+D_real2.item(),
         }
         
 
@@ -590,7 +586,7 @@ class TemplateTrainer():
         with tqdm(total=args.iterations+1, dynamic_ncols=True) as pbar:
             for i in range(args.iterations+1):
                 self.model.train()
-                for _ in range(3):
+                for _ in range(2):
                     dis_losses = self.gan_step(i)
                 total_loss, construct_loss, desc_kl_loss, nll_loss, kl_loss, mf_loss, tmf_loss = self.step(i)
                 
