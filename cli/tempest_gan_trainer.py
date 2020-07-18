@@ -540,6 +540,8 @@ class TemplateTrainer():
 
         D_fake1 = self.discriminator(fake_target1)
         D_fake2 = self.discriminator(fake_target2)
+        D_real1 = self.discriminator(target1, is_discrete=True)
+        D_real2 = self.discriminator(target2, is_discrete=True)
         # G_wgan1 = -D_fake1.mean()
         # G_wgan2 = -D_fake2.mean()
         # G_wgan = self.args.gen_weight * (G_wgan1 + G_wgan2 ) / 2
@@ -734,7 +736,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     trainer = TemplateTrainer(args)
-    trainer.gan_step(0)
+    # trainer.gan_step(0)
     # trainer.sample_results(None)
     # trainer.step(1)
     # trainer.calculate_bleu(None, size=1000)
