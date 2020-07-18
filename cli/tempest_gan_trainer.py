@@ -64,10 +64,7 @@ class TemplateTrainer():
         self.prod_embeddings = nn.Embedding(self.prod_size+1, args.user_latent_dim).cuda()
         torch.nn.init.xavier_uniform_(self.prod_embeddings.weight)
 
-        if args.biset:
-            generator_params = list(self.model.title_decoder.parameters()) + list(self.model.biset.parameters())
-        else:
-            generator_params = self.model.title_decoder.parameters() 
+        generator_params = self.model.parameters() 
 
         self.gen_opt = optim.Adam(generator_params, lr=args.gen_lr, betas=(0, 0.9))
         self.dis_opt = optim.Adam(self.discriminator.parameters(), lr=args.dis_lr, betas=(0, 0.9))
