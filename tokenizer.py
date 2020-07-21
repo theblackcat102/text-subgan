@@ -30,8 +30,10 @@ class WordTokenizer():
             word2idx = Constants.word2idx()
             # print(len(word2freq))
             for key, freq in word2freq.items():
-                word2idx[key] = len(word2idx)
-            idx2word = Constants.idx2word()
+                if key not in word2idx:
+                    word2idx[key] = len(word2idx)
+
+            idx2word = {}
             for token, idx in word2idx.items():
                 idx2word[idx] = token
 
@@ -61,6 +63,7 @@ class WordTokenizer():
             encoded = []
             for c in text:
                 if c in self.word2idx:
+                    # print(c, self.word2idx[c], self.idx2word[self.word2idx[c]] )
                     encoded.append(self.word2idx[c])
                 else:
                     encoded.append(self.word2idx[Constants.UNK_WORD])
@@ -136,3 +139,9 @@ class CharTokenizer():
             for sent in text:
                 sentences.append(encode_(sent))
             return np.array(sentences)
+
+
+if __name__ == "__main__":
+    tokenizer = WordTokenizer(postfix='tempest_word')
+    tokenizer.word2idx['##']
+    print(tokenizer.encode('【 首 ## 人氣 美食 ## 】 ## 排骨 烤肉 ##'))

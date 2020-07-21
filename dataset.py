@@ -564,9 +564,9 @@ def convert_bipartile():
 if __name__ == "__main__":
     import torch
 
-    dataset = KKDayUser(-1, 'data/kkday_dataset/user_data', 
-        'data/kkday_dataset/matrix_factorized_64.pkl',
-        prefix='item_graph', embedding=None, max_length=500, token_level='word')
+    # dataset = KKDayUser(-1, 'data/kkday_dataset/user_data', 
+    #     'data/kkday_dataset/matrix_factorized_64.pkl',
+    #     prefix='item_graph', embedding=None, max_length=500, token_level='word')
     # dataset = TextDataset(-1, 'data/kkday_dataset/train_article.txt', prefix='train_article', embedding=None, max_length=256)
     # dataset = TextDataset(-1, 'data/kkday_dataset/valid_title.txt', prefix='valid_title', embedding=None, max_length=128)
     # dataset = TextDataset(-1, 'data/kkday_dataset/valid_article.txt', prefix='valid_article', embedding=None, max_length=256)
@@ -591,11 +591,11 @@ if __name__ == "__main__":
     dataset = TemPest('dataset/', 'valid')
     print(len(dataset))
 
-    # dataloader = torch.utils.data.DataLoader(dataset, 
-    #     collate_fn=tempest_collate, batch_size=32, num_workers=0)
+    dataloader = torch.utils.data.DataLoader(dataset, 
+        collate_fn=tempest_collate, batch_size=32, num_workers=0)
 
-    # for batch in tqdm(dataloader):
-    #     print(batch['users'].shape)
+    for batch in tqdm(dataloader):
+        print(batch['users'].shape)
     #     users = batch['users']
     #     empty_users = users == -1
     #     batch_size = len(empty_users)

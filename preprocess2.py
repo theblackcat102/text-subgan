@@ -67,6 +67,7 @@ def preprocess_data(src_text, tgt_text, template_txt, user_data, cache_path, cor
     hit = 0
     logger.info('total title2product %d, total products %d' % (len(title2product), len(prod2id)))  
     data = []
+    print(src_text, tgt_text, template_txt)
     with open(src_text, 'r') as src_f, open(tgt_text, 'r') as tgt_f, open(template_txt, 'r') as tmp_f:
         for (src, tgt, tmt ) in zip( src_f.readlines(), tgt_f.readlines(), tmp_f.readlines() ):
             user_prod_pair = []
@@ -130,9 +131,9 @@ if __name__ == "__main__":
     parser = _get_parser()
 
     opt = parser.parse_args()
-    preprocess_data(opt.valid_src, opt.valid_tgt, opt.valid_template, opt.user_data, 
-        cache_path=opt.save_data, corpus_type='valid')
-    preprocess_data(opt.test_src, opt.test_tgt, opt.test_template, opt.user_data, 
-        cache_path=opt.save_data, corpus_type='test')
+    # preprocess_data(opt.valid_src, opt.valid_tgt, opt.valid_template, opt.user_data, 
+    #     cache_path=opt.save_data, corpus_type='valid')
+    # preprocess_data(opt.test_src, opt.test_tgt, opt.test_template, opt.user_data, 
+    #     cache_path=opt.save_data, corpus_type='test')
     preprocess_data(opt.train_src, opt.train_tgt, opt.train_template, opt.user_data, 
         cache_path=opt.save_data, corpus_type='train')
