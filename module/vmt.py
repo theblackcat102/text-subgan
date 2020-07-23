@@ -6,7 +6,7 @@ from module.seq2seq import LuongAttention
 from constant import Constants
 import torch.nn.functional as F
 from module.discriminator import CNNDiscriminator
-from module.biset import BiSET
+from module.biset import ConBiSET
 
 dis_filter_sizes = [2, 3, 4, 5]
 dis_num_filters = [64, 64, 64, 32]
@@ -158,7 +158,9 @@ class VMT(nn.Module):
 
         self.biset = None
         if biset:
-            self.biset = BiSET(article_hidden_size=enc_hidden_size, template_hidden_size= tmp_hidden_size, att_type='general')
+            self.biset = ConBiSET(article_hidden_size=enc_hidden_size, 
+                template_hidden_size= tmp_hidden_size,
+                user_hidden_size=user_latent_dim, att_type='general')
 
         self.max_seq_len = max_seq_len
         self.user_latent_dim = user_latent_dim
@@ -194,7 +196,7 @@ class VMT(nn.Module):
 
         latent = self.merge_proj(torch.cat([ tmp_latent, desc_latent, user_feature ], axis=1))
         if self.biset != None:
-            desc_outputs = self.biset(desc_outputs, tmp_outputs)
+            desc_outputs = self.biset(desc_outputs, tmp_outputs, user_feature)
 
         if gumbel:
             output_feat, output_logits, one_hot  = self.title_decoder(latent, desc_outputs, max_length, device=device, temperature=temperature, gumbel=True)
